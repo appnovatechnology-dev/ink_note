@@ -220,8 +220,14 @@ fun NoteCanvasScreen(
                         onDeleteMediaItem = { viewModel.deleteMediaItemOnPage(targetPageId, it) },
                         onJumpAudioToTimestamp = { viewModel.jumpAudioToTimestamp(it) },
                         onLassoComplete = { viewModel.handleLassoSelection(it) },
+                        onStartMoveLasso = { viewModel.startMovingLassoSelection() },
+                        onMoveLasso = { dx, dy -> viewModel.moveLassoSelection(dx, dy) },
+                        onFinishMoveLasso = { viewModel.finishMovingLassoSelection() },
                         onDuplicateLasso = { viewModel.duplicateLassoSelection() },
-                        onDeleteLasso = { viewModel.deleteLassoSelection() }
+                        onDeleteLasso = { viewModel.deleteLassoSelection() },
+                        onClearLasso = { viewModel.clearLassoSelection() },
+                        onConvertLassoToText = { viewModel.convertLassoToText() },
+                        onConvertLassoToMath = { viewModel.convertLassoToMath() }
                     )
                 }
             }

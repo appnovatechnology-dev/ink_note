@@ -170,7 +170,7 @@ object GeometryEngine {
         rulerAngleDeg: Float,
         rulerLength: Float = 650f,
         rulerThickness: Float = 110f,
-        snapThreshold: Float = 60f
+        snapThreshold: Float = 65f
     ): Pair<Float, Float>? {
         val angleRad = Math.toRadians(rulerAngleDeg.toDouble())
         val dirX = cos(angleRad).toFloat()
@@ -193,6 +193,7 @@ object GeometryEngine {
         val halfThick = rulerThickness / 2f
         val distToTopEdge = abs(normDist - halfThick)
         val distToBottomEdge = abs(normDist - (-halfThick))
+        val distToCenter = abs(normDist)
 
         return when {
             distToTopEdge <= snapThreshold && distToTopEdge <= distToBottomEdge -> {
@@ -202,7 +203,12 @@ object GeometryEngine {
             }
             distToBottomEdge <= snapThreshold -> {
                 val sx = rulerCenterX + dirX * proj - normalX * halfThick
-                val sy = rulerCenterY - dirY * proj - normalY * halfThick
+                val sy = rulerCenterY + dirY * proj - normalY * halfThick
+                Pair(sx, sy)
+            }
+            distToCenter <= (snapThreshold * 0.75f) -> {
+                val sx = rulerCenterX + dirX * proj
+                val sy = rulerCenterY + dirY * proj
                 Pair(sx, sy)
             }
             else -> null

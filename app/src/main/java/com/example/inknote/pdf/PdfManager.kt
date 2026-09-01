@@ -20,6 +20,31 @@ import java.io.FileOutputStream
 
 object PdfManager {
 
+    fun getOriginalFileName(context: Context, uri: Uri): String {
+        var name: String? = null
+        if (uri.scheme == "content") {
+            try {
+                context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (index != -1) {
+                            name = cursor.getString(index)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Ignore and fall back
+            }
+        }
+        if (name.isNullOrBlank()) {
+            name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
+        }
+        if (name.isNullOrBlank()) {
+            name = "Document"
+        }
+        return name ?: "Document"
+    }
+
     suspend fun importPdfToNotebook(
         context: Context,
         pdfUri: Uri,

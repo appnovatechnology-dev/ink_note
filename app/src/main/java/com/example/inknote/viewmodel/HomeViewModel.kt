@@ -4,11 +4,13 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.inknote.data.auth.AuthRepository
 import com.example.inknote.data.db.entities.NotebookEntity
 import com.example.inknote.data.db.entities.SubjectEntity
 import com.example.inknote.data.repository.NoteRepository
 import com.example.inknote.pdf.PdfManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,8 +42,10 @@ data class HomeUiState(
     val searchResultsTextCount: Int = 0
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = NoteRepository.getInstance(application)
+    private val authRepository = AuthRepository.getInstance(application)
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -56,37 +60,48 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun loadData() {
         viewModelScope.launch {
-            combine(
-                repository.allSubjects,
-                repository.allNotebooks,
-                _searchQuery,
-                _selectedFilter,
-                _selectedSubjectId
-            ) { subjects, notebooks, query, filter, subjectId ->
-                var filtered = notebooks
-
-                if (query.isNotBlank()) {
-                    filtered = filtered.filter { it.title.contains(query, ignoreCase = true) }
+            authRepository.currentUser.flatMapLatest { user ->
+                if (user == null) {
+                    _uiState.update { HomeUiState() }
+                    flowOf(Unit)
                 } else {
-                    filtered = when (filter) {
-                        NoteFilter.ALL -> filtered
-                        NoteFilter.FAVORITES -> filtered.filter { it.isFavorite }
-                        NoteFilter.RECENT -> filtered.sortedByDescending { it.updatedAt }.take(20)
-                        NoteFilter.SUBJECT -> filtered.filter { it.subjectId == subjectId }
-                    }
-                }
+                    combine(
+                        repository.getSubjects(user.id),
+                        repository.getNotebooks(user.id),
+                        _searchQuery,
+                        _selectedFilter,
+                        _selectedSubjectId
+                    ) { subjects, notebooks, query, filter, subjectId ->
+                        var filtered = notebooks
 
-                _uiState.update { current ->
-                    current.copy(
-                        subjects = subjects,
-                        notebooks = filtered,
-                        selectedFilter = filter,
-                        selectedSubjectId = subjectId,
-                        searchQuery = query
-                    )
+                        if (query.isNotBlank()) {
+                            filtered = filtered.filter { it.title.contains(query, ignoreCase = true) }
+                        } else {
+                            filtered = when (filter) {
+                                NoteFilter.ALL -> filtered
+                                NoteFilter.FAVORITES -> filtered.filter { it.isFavorite }
+                                NoteFilter.RECENT -> filtered.sortedByDescending { it.updatedAt }.take(20)
+                                NoteFilter.SUBJECT -> filtered.filter { it.subjectId == subjectId }
+                            }
+                        }
+
+                        _uiState.update { current ->
+                            current.copy(
+                                subjects = subjects,
+                                notebooks = filtered,
+                                selectedFilter = filter,
+                                selectedSubjectId = subjectId,
+                                searchQuery = query
+                            )
+                        }
+                    }
                 }
             }.collect()
         }
+    }
+
+    private fun currentUserId(): String {
+        return authRepository.currentUser.value?.id ?: ""
     }
 
     fun setFilter(filter: NoteFilter, subjectId: Long? = null) {
@@ -123,8 +138,10 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createSubject(name: String, colorHex: String) {
         if (name.isBlank()) return
+        val userId = currentUserId()
+        if (userId.isBlank()) return
         viewModelScope.launch {
-            repository.createSubject(name.trim(), colorHex)
+            repository.createSubject(userId, name.trim(), colorHex)
         }
     }
 
@@ -145,8 +162,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         onCreated: (Long) -> Unit
     ) {
         if (title.isBlank()) return
+        val userId = currentUserId()
+        if (userId.isBlank()) return
         viewModelScope.launch {
             val id = repository.createNotebook(
+                userId = userId,
                 title = title.trim(),
                 subjectId = subjectId,
                 coverColorHex = coverColorHex,
@@ -182,12 +202,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importPdf(uri: Uri, onComplete: (Long) -> Unit) {
+        val userId = currentUserId()
+        if (userId.isBlank()) return
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Imported Document"
             val cleanTitle = fileName.removeSuffix(".pdf")
 
             val notebookId = repository.createNotebook(
+                userId = userId,
                 title = cleanTitle,
                 subjectId = _selectedSubjectId.value,
                 coverColorHex = "#EC4899",

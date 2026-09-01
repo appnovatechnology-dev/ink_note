@@ -87,6 +87,8 @@ data class NoteCanvasUiState(
     val lassoPoints: List<Offset> = emptyList(),
     val hasSelection: Boolean = false,
     val lassoSelectedStrokes: List<VectorStroke> = emptyList(),
+    val lassoSelectedShapes: List<GeometricShape> = emptyList(),
+    val lassoSelectedTextItems: List<CanvasTextItem> = emptyList(),
     val lassoSelectionBounds: Rect? = null,
 
     // Audio State
@@ -549,7 +551,15 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
     // Lasso Selection
     fun handleLassoSelection(lassoPoints: List<Offset>) {
         if (lassoPoints.size < 3) {
-            _uiState.update { it.copy(hasSelection = false, lassoSelectedStrokes = emptyList(), lassoSelectionBounds = null) }
+            _uiState.update {
+                it.copy(
+                    hasSelection = false,
+                    lassoSelectedStrokes = emptyList(),
+                    lassoSelectedShapes = emptyList(),
+                    lassoSelectedTextItems = emptyList(),
+                    lassoSelectionBounds = null
+                )
+            }
             return
         }
 
@@ -567,15 +577,134 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
 
         val bounds = Rect(minX, minY, maxX, maxY)
 
-        val selected = _uiState.value.strokes.filter { stroke ->
+        val selectedStrokes = _uiState.value.strokes.filter { stroke ->
             stroke.points.any { p -> bounds.contains(Offset(p.x, p.y)) }
         }
+        val selectedShapes = _uiState.value.shapes.filter { shape ->
+            bounds.contains(Offset(shape.startX, shape.startY)) ||
+            bounds.contains(Offset(shape.endX, shape.endY)) ||
+            bounds.contains(Offset(shape.centerX, shape.centerY))
+        }
+        val selectedTextItems = _uiState.value.textItems.filter { item ->
+            val textRect = Rect(item.x, item.y, item.x + item.width, item.y + 60f)
+            bounds.overlaps(textRect)
+        }
+
+        val hasAny = selectedStrokes.isNotEmpty() || selectedShapes.isNotEmpty() || selectedTextItems.isNotEmpty()
+
+        var bMinX = bounds.left
+        var bMaxX = bounds.right
+        var bMinY = bounds.top
+        var bMaxY = bounds.bottom
+
+        if (hasAny) {
+            var calculatedMinX = Float.MAX_VALUE
+            var calculatedMaxX = Float.MIN_VALUE
+            var calculatedMinY = Float.MAX_VALUE
+            var calculatedMaxY = Float.MIN_VALUE
+
+            selectedStrokes.forEach { s ->
+                s.points.forEach { p ->
+                    calculatedMinX = min(calculatedMinX, p.x)
+                    calculatedMaxX = max(calculatedMaxX, p.x)
+                    calculatedMinY = min(calculatedMinY, p.y)
+                    calculatedMaxY = max(calculatedMaxY, p.y)
+                }
+            }
+            selectedShapes.forEach { s ->
+                calculatedMinX = min(calculatedMinX, min(s.startX, s.endX))
+                calculatedMaxX = max(calculatedMaxX, max(s.startX, s.endX))
+                calculatedMinY = min(calculatedMinY, min(s.startY, s.endY))
+                calculatedMaxY = max(calculatedMaxY, max(s.startY, s.endY))
+            }
+            selectedTextItems.forEach { t ->
+                calculatedMinX = min(calculatedMinX, t.x)
+                calculatedMaxX = max(calculatedMaxX, t.x + t.width)
+                calculatedMinY = min(calculatedMinY, t.y)
+                calculatedMaxY = max(calculatedMaxY, t.y + 60f)
+            }
+
+            if (calculatedMinX != Float.MAX_VALUE) {
+                bMinX = (calculatedMinX - 12f).coerceAtLeast(0f)
+                bMaxX = calculatedMaxX + 12f
+                bMinY = (calculatedMinY - 12f).coerceAtLeast(0f)
+                bMaxY = calculatedMaxY + 12f
+            }
+        }
+
+        val finalBounds = if (hasAny) Rect(bMinX, bMinY, bMaxX, bMaxY) else null
 
         _uiState.update {
             it.copy(
-                hasSelection = selected.isNotEmpty(),
-                lassoSelectedStrokes = selected,
-                lassoSelectionBounds = if (selected.isNotEmpty()) bounds else null
+                hasSelection = hasAny,
+                lassoSelectedStrokes = selectedStrokes,
+                lassoSelectedShapes = selectedShapes,
+                lassoSelectedTextItems = selectedTextItems,
+                lassoSelectionBounds = finalBounds
+            )
+        }
+    }
+
+    fun startMovingLassoSelection() {
+        pushUndoSnapshot()
+    }
+
+    fun moveLassoSelection(deltaX: Float, deltaY: Float) {
+        val selectedStrokes = _uiState.value.lassoSelectedStrokes
+        val selectedShapes = _uiState.value.lassoSelectedShapes
+        val selectedTextItems = _uiState.value.lassoSelectedTextItems
+        val bounds = _uiState.value.lassoSelectionBounds ?: return
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTextItems.isEmpty()) return
+
+        val movedStrokesMap = selectedStrokes.associateBy({ it.id }) { s ->
+            s.copy(points = s.points.map { p -> p.copy(x = p.x + deltaX, y = p.y + deltaY) })
+        }
+        val movedShapesMap = selectedShapes.associateBy({ it.id }) { s ->
+            s.copy(
+                startX = s.startX + deltaX,
+                startY = s.startY + deltaY,
+                endX = s.endX + deltaX,
+                endY = s.endY + deltaY
+            )
+        }
+        val movedTextsMap = selectedTextItems.associateBy({ it.id }) { t ->
+            t.copy(x = t.x + deltaX, y = t.y + deltaY)
+        }
+
+        val newStrokes = _uiState.value.strokes.map { s -> movedStrokesMap[s.id] ?: s }
+        val newShapes = _uiState.value.shapes.map { s -> movedShapesMap[s.id] ?: s }
+        val newTexts = _uiState.value.textItems.map { t -> movedTextsMap[t.id] ?: t }
+
+        val newBounds = Rect(
+            bounds.left + deltaX,
+            bounds.top + deltaY,
+            bounds.right + deltaX,
+            bounds.bottom + deltaY
+        )
+
+        updateActivePageData(strokes = newStrokes, shapes = newShapes, textItems = newTexts)
+        _uiState.update {
+            it.copy(
+                lassoSelectedStrokes = movedStrokesMap.values.toList(),
+                lassoSelectedShapes = movedShapesMap.values.toList(),
+                lassoSelectedTextItems = movedTextsMap.values.toList(),
+                lassoSelectionBounds = newBounds
+            )
+        }
+    }
+
+    fun finishMovingLassoSelection() {
+        scheduleAutoSave()
+    }
+
+    fun clearLassoSelection() {
+        _uiState.update {
+            it.copy(
+                hasSelection = false,
+                lassoSelectedStrokes = emptyList(),
+                lassoSelectedShapes = emptyList(),
+                lassoSelectedTextItems = emptyList(),
+                lassoSelectionBounds = null
             )
         }
     }
@@ -610,6 +739,8 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
                     isAiProcessing = false,
                     hasSelection = false,
                     lassoSelectedStrokes = emptyList(),
+                    lassoSelectedShapes = emptyList(),
+                    lassoSelectedTextItems = emptyList(),
                     lassoSelectionBounds = null
                 )
             }
@@ -648,6 +779,8 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
                     isAiProcessing = false,
                     hasSelection = false,
                     lassoSelectedStrokes = emptyList(),
+                    lassoSelectedShapes = emptyList(),
+                    lassoSelectedTextItems = emptyList(),
                     lassoSelectionBounds = null
                 )
             }
@@ -657,21 +790,50 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
 
     fun duplicateLassoSelection() {
         val selectedStrokes = _uiState.value.lassoSelectedStrokes
-        if (selectedStrokes.isEmpty()) return
+        val selectedShapes = _uiState.value.lassoSelectedShapes
+        val selectedTextItems = _uiState.value.lassoSelectedTextItems
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTextItems.isEmpty()) return
 
         pushUndoSnapshot()
-        val duplicated = selectedStrokes.map { s ->
+        val duplicatedStrokes = selectedStrokes.map { s ->
             s.copy(
+                id = System.currentTimeMillis() + (0..999).random(),
                 points = s.points.map { p -> p.copy(x = p.x + 30f, y = p.y + 30f) }
             )
         }
-        val newStrokes = _uiState.value.strokes + duplicated
-        updateActivePageData(strokes = newStrokes)
+        val duplicatedShapes = selectedShapes.map { s ->
+            s.copy(
+                id = System.currentTimeMillis() + (0..999).random(),
+                startX = s.startX + 30f,
+                startY = s.startY + 30f,
+                endX = s.endX + 30f,
+                endY = s.endY + 30f
+            )
+        }
+        val duplicatedTexts = selectedTextItems.map { t ->
+            t.copy(
+                id = System.currentTimeMillis() + (0..999).random(),
+                x = t.x + 30f,
+                y = t.y + 30f
+            )
+        }
+
+        val newStrokes = _uiState.value.strokes + duplicatedStrokes
+        val newShapes = _uiState.value.shapes + duplicatedShapes
+        val newTexts = _uiState.value.textItems + duplicatedTexts
+
+        val oldBounds = _uiState.value.lassoSelectionBounds
+        val newBounds = oldBounds?.let {
+            Rect(it.left + 30f, it.top + 30f, it.right + 30f, it.bottom + 30f)
+        }
+
+        updateActivePageData(strokes = newStrokes, shapes = newShapes, textItems = newTexts)
         _uiState.update {
             it.copy(
-                hasSelection = false,
-                lassoSelectedStrokes = emptyList(),
-                lassoSelectionBounds = null
+                lassoSelectedStrokes = duplicatedStrokes,
+                lassoSelectedShapes = duplicatedShapes,
+                lassoSelectedTextItems = duplicatedTexts,
+                lassoSelectionBounds = newBounds
             )
         }
         scheduleAutoSave()
@@ -679,15 +841,22 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
 
     fun deleteLassoSelection() {
         val selectedStrokes = _uiState.value.lassoSelectedStrokes
-        if (selectedStrokes.isEmpty()) return
+        val selectedShapes = _uiState.value.lassoSelectedShapes
+        val selectedTextItems = _uiState.value.lassoSelectedTextItems
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTextItems.isEmpty()) return
 
         pushUndoSnapshot()
         val remainingStrokes = _uiState.value.strokes.filterNot { selectedStrokes.contains(it) }
-        updateActivePageData(strokes = remainingStrokes)
+        val remainingShapes = _uiState.value.shapes.filterNot { selectedShapes.contains(it) }
+        val remainingTexts = _uiState.value.textItems.filterNot { selectedTextItems.contains(it) }
+
+        updateActivePageData(strokes = remainingStrokes, shapes = remainingShapes, textItems = remainingTexts)
         _uiState.update {
             it.copy(
                 hasSelection = false,
                 lassoSelectedStrokes = emptyList(),
+                lassoSelectedShapes = emptyList(),
+                lassoSelectedTextItems = emptyList(),
                 lassoSelectionBounds = null
             )
         }
@@ -696,13 +865,17 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
 
     fun changeLassoColor(color: Color) {
         val selectedStrokes = _uiState.value.lassoSelectedStrokes
-        if (selectedStrokes.isEmpty()) return
+        val selectedShapes = _uiState.value.lassoSelectedShapes
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty()) return
 
         pushUndoSnapshot()
         val updatedStrokes = _uiState.value.strokes.map { s ->
             if (selectedStrokes.contains(s)) s.copy(color = color) else s
         }
-        updateActivePageData(strokes = updatedStrokes)
+        val updatedShapes = _uiState.value.shapes.map { s ->
+            if (selectedShapes.contains(s)) s.copy(strokeColor = color) else s
+        }
+        updateActivePageData(strokes = updatedStrokes, shapes = updatedShapes)
         scheduleAutoSave()
     }
 

@@ -5,12 +5,39 @@ import com.example.inknote.data.db.entities.*
 import kotlinx.coroutines.flow.Flow
 
 @Dao
+interface UserAccountDao {
+    @Query("SELECT * FROM user_accounts WHERE email = :email LIMIT 1")
+    suspend fun getUserByEmail(email: String): UserAccountEntity?
+
+    @Query("SELECT * FROM user_accounts WHERE id = :id LIMIT 1")
+    suspend fun getUserById(id: String): UserAccountEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertUser(user: UserAccountEntity)
+
+    @Update
+    suspend fun updateUser(user: UserAccountEntity)
+
+    @Query("SELECT * FROM user_accounts ORDER BY lastLoginAt DESC LIMIT 1")
+    suspend fun getLastActiveUser(): UserAccountEntity?
+
+    @Query("SELECT * FROM user_accounts")
+    suspend fun getAllUsers(): List<UserAccountEntity>
+}
+
+@Dao
 interface SubjectDao {
-    @Query("SELECT * FROM subjects ORDER BY sortOrder ASC, id ASC")
-    fun getAllSubjects(): Flow<List<SubjectEntity>>
+    @Query("SELECT * FROM subjects WHERE userId = :userId ORDER BY sortOrder ASC, id ASC")
+    fun getAllSubjects(userId: String): Flow<List<SubjectEntity>>
+
+    @Query("SELECT * FROM subjects WHERE userId = :userId ORDER BY sortOrder ASC, id ASC")
+    suspend fun getAllSubjectsList(userId: String): List<SubjectEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSubject(subject: SubjectEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertSubjects(subjects: List<SubjectEntity>): List<Long>
 
     @Update
     suspend fun updateSubject(subject: SubjectEntity)
@@ -18,29 +45,44 @@ interface SubjectDao {
     @Delete
     suspend fun deleteSubject(subject: SubjectEntity)
 
-    @Query("SELECT * FROM subjects WHERE id = :id")
-    suspend fun getSubjectById(id: Long): SubjectEntity?
+    @Query("SELECT * FROM subjects WHERE id = :id AND userId = :userId")
+    suspend fun getSubjectById(userId: String, id: Long): SubjectEntity?
+
+    @Query("DELETE FROM subjects WHERE userId = :userId")
+    suspend fun deleteSubjectsForUser(userId: String)
 }
 
 @Dao
 interface NotebookDao {
-    @Query("SELECT * FROM notebooks WHERE isArchived = 0 ORDER BY updatedAt DESC")
-    fun getAllNotebooks(): Flow<List<NotebookEntity>>
+    @Query("SELECT * FROM notebooks WHERE userId = :userId AND isArchived = 0 ORDER BY updatedAt DESC")
+    fun getAllNotebooks(userId: String): Flow<List<NotebookEntity>>
 
-    @Query("SELECT * FROM notebooks WHERE subjectId = :subjectId AND isArchived = 0 ORDER BY updatedAt DESC")
-    fun getNotebooksBySubject(subjectId: Long): Flow<List<NotebookEntity>>
+    @Query("SELECT * FROM notebooks WHERE userId = :userId AND isArchived = 0 ORDER BY updatedAt DESC")
+    suspend fun getAllNotebooksList(userId: String): List<NotebookEntity>
 
-    @Query("SELECT * FROM notebooks WHERE isFavorite = 1 AND isArchived = 0 ORDER BY updatedAt DESC")
-    fun getFavoriteNotebooks(): Flow<List<NotebookEntity>>
+    @Query("SELECT * FROM notebooks WHERE userId = :userId AND subjectId = :subjectId AND isArchived = 0 ORDER BY updatedAt DESC")
+    fun getNotebooksBySubject(userId: String, subjectId: Long): Flow<List<NotebookEntity>>
+
+    @Query("SELECT * FROM notebooks WHERE userId = :userId AND isFavorite = 1 AND isArchived = 0 ORDER BY updatedAt DESC")
+    fun getFavoriteNotebooks(userId: String): Flow<List<NotebookEntity>>
 
     @Query("SELECT * FROM notebooks WHERE id = :id")
     suspend fun getNotebookById(id: Long): NotebookEntity?
 
+    @Query("SELECT * FROM notebooks WHERE id = :id AND userId = :userId")
+    suspend fun getNotebookByIdForUser(userId: String, id: Long): NotebookEntity?
+
     @Query("SELECT * FROM notebooks WHERE id = :id")
     fun getNotebookFlowById(id: Long): Flow<NotebookEntity?>
 
+    @Query("SELECT * FROM notebooks WHERE id = :id AND userId = :userId")
+    fun getNotebookFlowByIdForUser(userId: String, id: Long): Flow<NotebookEntity?>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertNotebook(notebook: NotebookEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertNotebooks(notebooks: List<NotebookEntity>): List<Long>
 
     @Update
     suspend fun updateNotebook(notebook: NotebookEntity)
@@ -48,8 +90,11 @@ interface NotebookDao {
     @Delete
     suspend fun deleteNotebook(notebook: NotebookEntity)
 
-    @Query("SELECT * FROM notebooks WHERE title LIKE '%' || :query || '%' ORDER BY updatedAt DESC")
-    fun searchNotebooks(query: String): Flow<List<NotebookEntity>>
+    @Query("SELECT * FROM notebooks WHERE userId = :userId AND title LIKE '%' || :query || '%' ORDER BY updatedAt DESC")
+    fun searchNotebooks(userId: String, query: String): Flow<List<NotebookEntity>>
+
+    @Query("DELETE FROM notebooks WHERE userId = :userId")
+    suspend fun deleteNotebooksForUser(userId: String)
 }
 
 @Dao
@@ -77,6 +122,9 @@ interface PageDao {
 
     @Query("DELETE FROM pages WHERE notebookId = :notebookId AND pageNumber = :pageNumber")
     suspend fun deletePageByNumber(notebookId: Long, pageNumber: Int)
+
+    @Query("DELETE FROM pages WHERE userId = :userId")
+    suspend fun deletePagesForUser(userId: String)
 }
 
 @Dao
@@ -101,6 +149,9 @@ interface StrokeDao {
 
     @Query("DELETE FROM strokes WHERE id IN (:strokeIds)")
     suspend fun deleteStrokesByIds(strokeIds: List<Long>)
+
+    @Query("DELETE FROM strokes WHERE userId = :userId")
+    suspend fun clearStrokesForUser(userId: String)
 }
 
 @Dao
@@ -128,6 +179,9 @@ interface ShapeDao {
 
     @Query("DELETE FROM shapes WHERE pageId = :pageId")
     suspend fun clearShapesForPage(pageId: Long)
+
+    @Query("DELETE FROM shapes WHERE userId = :userId")
+    suspend fun clearShapesForUser(userId: String)
 }
 
 @Dao
@@ -141,6 +195,9 @@ interface TextItemDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTextItem(item: TextItemEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTextItems(items: List<TextItemEntity>): List<Long>
+
     @Update
     suspend fun updateTextItem(item: TextItemEntity)
 
@@ -150,11 +207,14 @@ interface TextItemDao {
     @Query("SELECT text_items.* FROM text_items INNER JOIN pages ON text_items.pageId = pages.id WHERE pages.notebookId = :notebookId AND text_items.text LIKE '%' || :query || '%'")
     suspend fun searchInNotebook(notebookId: Long, query: String): List<TextItemEntity>
 
-    @Query("SELECT * FROM text_items WHERE text LIKE '%' || :query || '%'")
-    suspend fun searchAllText(query: String): List<TextItemEntity>
+    @Query("SELECT * FROM text_items WHERE userId = :userId AND text LIKE '%' || :query || '%'")
+    suspend fun searchAllText(userId: String, query: String): List<TextItemEntity>
 
     @Query("DELETE FROM text_items WHERE pageId = :pageId")
     suspend fun clearTextForPage(pageId: Long)
+
+    @Query("DELETE FROM text_items WHERE userId = :userId")
+    suspend fun clearTextForUser(userId: String)
 }
 
 @Dao
@@ -168,6 +228,9 @@ interface MediaItemDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMediaItem(item: MediaItemEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMediaItems(items: List<MediaItemEntity>): List<Long>
+
     @Update
     suspend fun updateMediaItem(item: MediaItemEntity)
 
@@ -176,6 +239,9 @@ interface MediaItemDao {
 
     @Query("DELETE FROM media_items WHERE pageId = :pageId")
     suspend fun clearMediaForPage(pageId: Long)
+
+    @Query("DELETE FROM media_items WHERE userId = :userId")
+    suspend fun clearMediaForUser(userId: String)
 }
 
 @Dao
@@ -191,6 +257,9 @@ interface AudioDao {
 
     @Delete
     suspend fun deleteRecording(recording: AudioRecordingEntity)
+
+    @Query("DELETE FROM audio_recordings WHERE userId = :userId")
+    suspend fun clearAudioForUser(userId: String)
 }
 
 @Dao
@@ -206,6 +275,9 @@ interface PageSnapshotDao {
 
     @Delete
     suspend fun deleteSnapshot(snapshot: PageSnapshotEntity)
+
+    @Query("DELETE FROM page_snapshots WHERE userId = :userId")
+    suspend fun clearSnapshotsForUser(userId: String)
 }
 
 @Dao
@@ -230,4 +302,7 @@ interface FlashcardDao {
 
     @Query("DELETE FROM flashcards WHERE notebookId = :notebookId")
     suspend fun clearFlashcardsForNotebook(notebookId: Long)
+
+    @Query("DELETE FROM flashcards WHERE userId = :userId")
+    suspend fun clearFlashcardsForUser(userId: String)
 }

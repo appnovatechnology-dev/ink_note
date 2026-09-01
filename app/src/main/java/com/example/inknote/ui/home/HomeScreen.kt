@@ -47,7 +47,13 @@ import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.inknote.data.db.entities.NotebookEntity
 import com.example.inknote.data.db.entities.SubjectEntity
+import com.example.inknote.data.db.entities.UserAccountEntity
+import com.example.inknote.data.auth.AuthRepository
+import com.example.inknote.data.cloud.CloudSyncState
+import com.example.inknote.ui.auth.AccountProfileDialog
 import com.example.inknote.ui.canvas.components.SecurityPinDialog
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import com.example.ui.theme.NoteInkColors
 import com.example.inknote.viewmodel.HomeUiState
 import com.example.inknote.viewmodel.HomeViewModel
@@ -62,11 +68,21 @@ import kotlin.math.roundToInt
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel,
+    authRepository: AuthRepository? = null,
     onOpenNotebook: (Long) -> Unit
 ) {
+    val context = LocalContext.current
+    val authRepo = authRepository ?: remember { AuthRepository.getInstance(context) }
+    val currentUser by authRepo.currentUser.collectAsStateWithLifecycle()
+    val syncState by authRepo.syncState.collectAsStateWithLifecycle()
+    val lastSyncTimestamp by authRepo.lastSyncTimestamp.collectAsStateWithLifecycle()
+    val isFirebaseActive by authRepo.isFirebaseActive.collectAsStateWithLifecycle()
+
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    var showProfileDialog by remember { mutableStateOf(false) }
 
     val pdfPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -119,6 +135,9 @@ fun HomeScreen(
                     subjects = uiState.subjects,
                     selectedFilter = uiState.selectedFilter,
                     selectedSubjectId = uiState.selectedSubjectId,
+                    currentUser = currentUser,
+                    syncState = syncState,
+                    onOpenProfile = { showProfileDialog = true },
                     draggedNotebook = draggedNotebook,
                     activeDropTargetId = activeDropTargetId,
                     onRegisterDropTarget = { id, rect ->
@@ -158,6 +177,48 @@ fun HomeScreen(
                             }
                         },
                         actions = {
+                            // Cloud Sync Status Pill
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier
+                                    .clickable {
+                                        authRepo.triggerSync()
+                                        showProfileDialog = true
+                                    }
+                                    .padding(end = 4.dp)
+                                    .testTag("button_cloud_sync_status")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    when (syncState) {
+                                        CloudSyncState.SYNCING -> {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(12.dp),
+                                                strokeWidth = 1.5.dp,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Text("Syncing", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
+                                        }
+                                        CloudSyncState.SYNCED -> {
+                                            Icon(Icons.Default.CloudDone, contentDescription = "Synced", tint = Color(0xFF10B981), modifier = Modifier.size(14.dp))
+                                            Text("Synced", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = Color(0xFF10B981))
+                                        }
+                                        CloudSyncState.OFFLINE -> {
+                                            Icon(Icons.Default.CloudOff, contentDescription = "Offline", tint = Color(0xFFF59E0B), modifier = Modifier.size(14.dp))
+                                            Text("Offline", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = Color(0xFFF59E0B))
+                                        }
+                                        else -> {
+                                            Icon(Icons.Default.CloudQueue, contentDescription = "Cloud", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                                            Text("Cloud", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.primary)
+                                        }
+                                    }
+                                }
+                            }
+
                             IconButton(onClick = { viewModel.toggleViewMode() }) {
                                 Icon(
                                     imageVector = if (uiState.viewMode == ViewMode.GRID) Icons.AutoMirrored.Filled.ViewList else Icons.Default.GridView,
@@ -166,6 +227,38 @@ fun HomeScreen(
                             }
                             IconButton(onClick = { pdfPickerLauncher.launch("application/pdf") }) {
                                 Icon(Icons.Default.PictureAsPdf, contentDescription = "Import PDF", tint = MaterialTheme.colorScheme.primary)
+                            }
+
+                            // User Profile Avatar Button
+                            val user = currentUser
+                            val avatarBg = user?.avatarColorHex?.let {
+                                try { Color(android.graphics.Color.parseColor(it)) } catch(e: Exception) { MaterialTheme.colorScheme.primary }
+                            } ?: MaterialTheme.colorScheme.primary
+
+                            val initials = (user?.displayName ?: "User")
+                                .split(" ")
+                                .mapNotNull { it.firstOrNull()?.toString() }
+                                .take(2)
+                                .joinToString("")
+                                .ifEmpty { "U" }
+                                .uppercase()
+
+                            Box(
+                                modifier = Modifier
+                                    .padding(start = 4.dp, end = 8.dp)
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(avatarBg)
+                                    .clickable { showProfileDialog = true }
+                                    .testTag("button_user_profile"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = initials,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -566,6 +659,25 @@ fun HomeScreen(
             onDismiss = { notebookToUnlock = null }
         )
     }
+
+    if (showProfileDialog && currentUser != null) {
+        AccountProfileDialog(
+            user = currentUser!!,
+            syncStatus = syncState,
+            isFirebaseActive = isFirebaseActive,
+            lastSyncTime = lastSyncTimestamp,
+            onDismiss = { showProfileDialog = false },
+            onSignOut = {
+                showProfileDialog = false
+                coroutineScope.launch {
+                    authRepo.signOut()
+                }
+            },
+            onSyncNow = {
+                authRepo.triggerSync()
+            }
+        )
+    }
 }
 
 @Composable
@@ -573,6 +685,9 @@ fun HomeSidebar(
     subjects: List<SubjectEntity>,
     selectedFilter: NoteFilter,
     selectedSubjectId: Long?,
+    currentUser: UserAccountEntity? = null,
+    syncState: CloudSyncState = CloudSyncState.IDLE,
+    onOpenProfile: () -> Unit = {},
     draggedNotebook: NotebookEntity? = null,
     activeDropTargetId: Long? = null,
     onRegisterDropTarget: (Long, Rect) -> Unit = { _, _ -> },
@@ -764,14 +879,106 @@ fun HomeSidebar(
             }
         }
 
-        // Offline Status Badge at bottom
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.padding(8.dp)
-        ) {
-            Box(modifier = Modifier.size(8.dp).background(Color(0xFF10B981), CircleShape))
-            Text("100% Local & Offline", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // User Account & Cloud Sync at bottom of sidebar
+        if (currentUser != null) {
+            val userAvatarBg = try {
+                Color(android.graphics.Color.parseColor(currentUser.avatarColorHex))
+            } catch (e: Exception) {
+                MaterialTheme.colorScheme.primary
+            }
+
+            val sidebarInitials = currentUser.displayName
+                .split(" ")
+                .mapNotNull { it.firstOrNull()?.toString() }
+                .take(2)
+                .joinToString("")
+                .ifEmpty { "U" }
+                .uppercase()
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenProfile() }
+                    .testTag("sidebar_user_profile_card"),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(userAvatarBg),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = sidebarInitials,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = currentUser.displayName,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .background(
+                                        when (syncState) {
+                                            CloudSyncState.SYNCED -> Color(0xFF10B981)
+                                            CloudSyncState.SYNCING -> MaterialTheme.colorScheme.primary
+                                            CloudSyncState.OFFLINE -> Color(0xFFF59E0B)
+                                            else -> Color(0xFF10B981)
+                                        },
+                                        CircleShape
+                                    )
+                            )
+                            Text(
+                                text = when (syncState) {
+                                    CloudSyncState.SYNCED -> "Cloud Synced"
+                                    CloudSyncState.SYNCING -> "Syncing..."
+                                    CloudSyncState.OFFLINE -> "Offline Ready"
+                                    else -> "Cloud Active"
+                                },
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Icon(
+                        Icons.Default.ChevronRight,
+                        contentDescription = "Open Account",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        } else {
+            // Fallback Offline Status Badge at bottom
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(8.dp)
+            ) {
+                Box(modifier = Modifier.size(8.dp).background(Color(0xFF10B981), CircleShape))
+                Text("100% Local & Offline", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
