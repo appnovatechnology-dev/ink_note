@@ -82,7 +82,6 @@ fun InkNoteApp(
 ) {
     val navController = rememberNavController()
     val homeViewModel: HomeViewModel = viewModel(key = "home_${user.id}")
-    val canvasViewModel: NoteCanvasViewModel = viewModel(key = "canvas_${user.id}")
 
     NavHost(
         navController = navController,
@@ -105,6 +104,7 @@ fun InkNoteApp(
             )
         ) { backStackEntry ->
             val notebookId = backStackEntry.arguments?.getLong("notebookId") ?: 0L
+            val canvasViewModel: NoteCanvasViewModel = viewModel(key = "canvas_${user.id}_$notebookId")
             NoteCanvasScreen(
                 notebookId = notebookId,
                 viewModel = canvasViewModel,

@@ -29,10 +29,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.testTag
 import com.example.inknote.data.model.ShapeType
 import com.example.inknote.data.model.ToolType
 import com.example.ui.theme.NoteInkColors
 import com.example.inknote.viewmodel.EraserMode
+import com.example.inknote.viewmodel.SaveStatus
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,7 +45,10 @@ fun CanvasTopAppBar(
     canRedo: Boolean,
     isPalmRejectionActive: Boolean,
     isLocked: Boolean,
+    saveStatus: SaveStatus = SaveStatus.SAVED,
+    saveErrorMessage: String? = null,
     onBack: () -> Unit,
+    onSave: () -> Unit = {},
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onExport: () -> Unit,
@@ -59,7 +64,10 @@ fun CanvasTopAppBar(
 
     TopAppBar(
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Text(
                     text = notebookTitle,
                     maxLines = 1,
@@ -74,6 +82,63 @@ fun CanvasTopAppBar(
                         modifier = Modifier.size(16.dp)
                     )
                 }
+
+                // Continuous Auto-Save Status Indicator
+                when (saveStatus) {
+                    SaveStatus.SAVING -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(10.dp),
+                                strokeWidth = 1.5.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text("Saving...", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    SaveStatus.SAVED -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF10B981).copy(alpha = 0.12f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.CheckCircle,
+                                contentDescription = "Saved locally",
+                                tint = Color(0xFF10B981),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text("Saved", fontSize = 11.sp, color = Color(0xFF047857), fontWeight = FontWeight.Medium)
+                        }
+                    }
+                    SaveStatus.ERROR -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.ErrorOutline,
+                                contentDescription = "Save Error: $saveErrorMessage",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text("Save Failed", fontSize = 11.sp, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
             }
         },
         navigationIcon = {
@@ -82,6 +147,16 @@ fun CanvasTopAppBar(
             }
         },
         actions = {
+            IconButton(
+                onClick = onSave,
+                modifier = Modifier.testTag("button_manual_save")
+            ) {
+                Icon(
+                    Icons.Default.Save,
+                    contentDescription = "Save Note Now",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
             IconButton(onClick = onUndo, enabled = canUndo) {
                 Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo", tint = if (canUndo) MaterialTheme.colorScheme.onSurface else Color.LightGray)
             }

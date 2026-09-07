@@ -379,7 +379,7 @@ class CloudSyncManager private constructor(private val context: Context) {
                 return@withContext true
             }
 
-            // Purge and restore this user's data cleanly
+            // Upsert user profile
             db.userAccountDao().insertUser(
                 UserAccountEntity(
                     id = user.id,
@@ -392,38 +392,97 @@ class CloudSyncManager private constructor(private val context: Context) {
                 )
             )
 
-            // Clear old local records for this user before restoring
-            db.notebookDao().deleteNotebooksForUser(user.id)
-            db.subjectDao().deleteSubjectsForUser(user.id)
-            db.pageDao().deletePagesForUser(user.id)
-            db.strokeDao().clearStrokesForUser(user.id)
-            db.shapeDao().clearShapesForUser(user.id)
-            db.textItemDao().clearTextForUser(user.id)
+            // Non-destructive intelligent merge: local SQLite is the source of truth
+            val localNotebooks = db.notebookDao().getAllNotebooksList(user.id).associateBy { it.id }
+            val localSubjects = db.subjectDao().getAllSubjectsList(user.id).associateBy { it.id }
 
-            // Restore subjects with user.id
-            for (sub in bundle.subjects) {
-                db.subjectDao().insertSubject(sub.copy(userId = user.id))
-            }
+            if (localNotebooks.isEmpty()) {
+                // If local has no notebooks at all for this user, restore cleanly from the bundle
+                for (sub in bundle.subjects) {
+                    db.subjectDao().insertSubject(sub.copy(userId = user.id))
+                }
+                for (nb in bundle.notebooks) {
+                    db.notebookDao().insertNotebook(nb.copy(userId = user.id))
+                }
+                for (page in bundle.pages) {
+                    db.pageDao().insertPage(page.copy(userId = user.id))
+                }
+                if (bundle.strokes.isNotEmpty()) {
+                    db.strokeDao().insertStrokes(bundle.strokes.map { it.copy(userId = user.id) })
+                }
+                if (bundle.shapes.isNotEmpty()) {
+                    db.shapeDao().insertShapes(bundle.shapes.map { it.copy(userId = user.id) })
+                }
+                for (item in bundle.textItems) {
+                    db.textItemDao().insertTextItem(item.copy(userId = user.id))
+                }
+            } else {
+                // Local notes exist! Preserve every local note and merge missing/newer remote notes
+                for (sub in bundle.subjects) {
+                    if (!localSubjects.containsKey(sub.id)) {
+                        db.subjectDao().insertSubject(sub.copy(userId = user.id))
+                    }
+                }
 
-            // Restore notebooks with user.id
-            for (nb in bundle.notebooks) {
-                db.notebookDao().insertNotebook(nb.copy(userId = user.id))
-            }
+                var hasLocalNewerOrUnique = false
+                for (cloudNb in bundle.notebooks) {
+                    val localNb = localNotebooks[cloudNb.id]
+                    if (localNb == null) {
+                        // Remote notebook is not present locally; restore it
+                        db.notebookDao().insertNotebook(cloudNb.copy(userId = user.id))
+                        val pagesForNb = bundle.pages.filter { it.notebookId == cloudNb.id }
+                        for (page in pagesForNb) {
+                            db.pageDao().insertPage(page.copy(userId = user.id))
+                            val pageStrokes = bundle.strokes.filter { it.pageId == page.id }
+                            if (pageStrokes.isNotEmpty()) {
+                                db.strokeDao().insertStrokes(pageStrokes.map { it.copy(userId = user.id) })
+                            }
+                            val pageShapes = bundle.shapes.filter { it.pageId == page.id }
+                            if (pageShapes.isNotEmpty()) {
+                                db.shapeDao().insertShapes(pageShapes.map { it.copy(userId = user.id) })
+                            }
+                            val pageTexts = bundle.textItems.filter { it.pageId == page.id }
+                            for (ti in pageTexts) {
+                                db.textItemDao().insertTextItem(ti.copy(userId = user.id))
+                            }
+                        }
+                    } else if (cloudNb.updatedAt > localNb.updatedAt) {
+                        // Remote is strictly newer than local
+                        db.notebookDao().updateNotebook(cloudNb.copy(userId = user.id))
+                        val pagesForNb = bundle.pages.filter { it.notebookId == cloudNb.id }
+                        for (page in pagesForNb) {
+                            db.pageDao().insertPage(page.copy(userId = user.id))
+                            db.strokeDao().clearStrokesForPage(page.id)
+                            val pageStrokes = bundle.strokes.filter { it.pageId == page.id }
+                            if (pageStrokes.isNotEmpty()) {
+                                db.strokeDao().insertStrokes(pageStrokes.map { it.copy(userId = user.id) })
+                            }
+                            db.shapeDao().clearShapesForPage(page.id)
+                            val pageShapes = bundle.shapes.filter { it.pageId == page.id }
+                            if (pageShapes.isNotEmpty()) {
+                                db.shapeDao().insertShapes(pageShapes.map { it.copy(userId = user.id) })
+                            }
+                            db.textItemDao().clearTextForPage(page.id)
+                            val pageTexts = bundle.textItems.filter { it.pageId == page.id }
+                            for (ti in pageTexts) {
+                                db.textItemDao().insertTextItem(ti.copy(userId = user.id))
+                            }
+                        }
+                    } else {
+                        // Local is newer or equal; keep local untouched
+                        hasLocalNewerOrUnique = true
+                    }
+                }
 
-            // Restore pages with user.id
-            for (page in bundle.pages) {
-                db.pageDao().insertPage(page.copy(userId = user.id))
-            }
+                // If local has notebooks not in cloud, or newer edits, update the cloud backup
+                val cloudNbIds = bundle.notebooks.map { it.id }.toSet()
+                if (localNotebooks.keys.any { it !in cloudNbIds }) {
+                    hasLocalNewerOrUnique = true
+                }
 
-            // Restore strokes, shapes, and texts with user.id
-            if (bundle.strokes.isNotEmpty()) {
-                db.strokeDao().insertStrokes(bundle.strokes.map { it.copy(userId = user.id) })
-            }
-            if (bundle.shapes.isNotEmpty()) {
-                db.shapeDao().insertShapes(bundle.shapes.map { it.copy(userId = user.id) })
-            }
-            for (item in bundle.textItems) {
-                db.textItemDao().insertTextItem(item.copy(userId = user.id))
+                if (hasLocalNewerOrUnique) {
+                    pushToCloud(user)
+                }
             }
 
             _lastSyncTimestamp.value = bundle.lastSyncedAt

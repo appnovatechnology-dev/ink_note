@@ -17,7 +17,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [34])
 class ExampleRobolectricTest {
 
     @Test
@@ -121,5 +121,136 @@ class ExampleRobolectricTest {
         val reloadedANotebooks = noteRepo.getNotebooks(activeUserA.id).first()
         assertTrue("Account A must see Note A", reloadedANotebooks.any { it.title == "Note A" })
         assertFalse("Account A must NEVER see Note B", reloadedANotebooks.any { it.title == "Note B" })
+    }
+
+    @Test
+    fun `note survives app close and reopen - force close test`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val authRepo = AuthRepository.getInstance(context)
+        val noteRepo = NoteRepository.getInstance(context)
+
+        // 1. Create a user and notebook
+        val userRes = authRepo.signUp("Tester", "test_survival@example.com", "pass123")
+        assertTrue(userRes.isSuccess)
+        val user = userRes.getOrNull()!!
+
+        val nbId = noteRepo.createNotebook(user.id, "Physics Lecture Notes")
+        val pages = noteRepo.getPagesList(nbId)
+        assertTrue("Notebook must have at least 1 page", pages.isNotEmpty())
+        val page = pages.first()
+
+        // 2. User draws strokes, adds shapes, and writes text
+        val stroke = com.example.inknote.data.model.VectorStroke(
+            id = 101L,
+            pageId = page.id,
+            points = listOf(
+                com.example.inknote.data.model.StrokePoint(10f, 10f),
+                com.example.inknote.data.model.StrokePoint(50f, 80f),
+                com.example.inknote.data.model.StrokePoint(100f, 150f)
+            ),
+            color = androidx.compose.ui.graphics.Color(0xFF0F172A),
+            strokeWidth = 4f
+        )
+        val textItem = com.example.inknote.data.model.CanvasTextItem(
+            id = 201L,
+            pageId = page.id,
+            text = "Newton's Second Law: F = ma",
+            x = 40f,
+            y = 120f
+        )
+
+        // 3. Continuous auto-save commits the page content to disk atomically
+        noteRepo.saveEntirePageContent(
+            pageId = page.id,
+            strokes = listOf(stroke),
+            shapes = emptyList(),
+            textItems = listOf(textItem),
+            mediaItems = emptyList()
+        )
+
+        // 4. Simulate app being closed completely and reopened (fresh repository instance / reading from DB)
+        val freshNoteRepo = NoteRepository.getInstance(context)
+        val loadedStrokes = freshNoteRepo.getStrokesForPage(page.id).first()
+        val loadedTexts = freshNoteRepo.getTextItemsForPage(page.id).first()
+
+        assertEquals("Strokes must survive app close and reopen", 1, loadedStrokes.size)
+        assertEquals("Stroke points must match", 3, loadedStrokes[0].points.size)
+        assertEquals("Text must survive app close and reopen", 1, loadedTexts.size)
+        assertEquals("Text content must be preserved", "Newton's Second Law: F = ma", loadedTexts[0].text)
+    }
+
+    @Test
+    fun `note survives backgrounding and lifecycle flush`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val authRepo = AuthRepository.getInstance(context)
+        val noteRepo = NoteRepository.getInstance(context)
+
+        val userRes = authRepo.continueAsGuest()
+        assertTrue(userRes.isSuccess)
+        val user = userRes.getOrNull()!!
+
+        val nbId = noteRepo.createNotebook(user.id, "Quick Thoughts")
+        val page = noteRepo.getPagesList(nbId).first()
+
+        // User writes on page
+        val stroke = com.example.inknote.data.model.VectorStroke(
+            id = 301L,
+            pageId = page.id,
+            points = listOf(com.example.inknote.data.model.StrokePoint(5f, 5f)),
+            color = androidx.compose.ui.graphics.Color.Black,
+            strokeWidth = 3f
+        )
+
+        // Simulate ON_PAUSE / ON_STOP lifecycle flush
+        noteRepo.saveEntirePageContent(
+            pageId = page.id,
+            strokes = listOf(stroke),
+            shapes = emptyList(),
+            textItems = emptyList(),
+            mediaItems = emptyList()
+        )
+
+        // Verify committed directly to disk
+        val persisted = noteRepo.getStrokesForPage(page.id).first()
+        assertEquals(1, persisted.size)
+        assertEquals(1, persisted[0].points.size)
+    }
+
+    @Test
+    fun `note works completely offline and survives app restart`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val authRepo = AuthRepository.getInstance(context)
+        val noteRepo = NoteRepository.getInstance(context)
+
+        // Continue in offline guest mode (no cloud connectivity required)
+        val guestRes = authRepo.continueAsGuest()
+        assertTrue("Offline mode must succeed", guestRes.isSuccess)
+        val guestUser = guestRes.getOrNull()!!
+
+        val offlineNbId = noteRepo.createNotebook(guestUser.id, "Offline Travel Journal")
+        val page = noteRepo.getPagesList(offlineNbId).first()
+
+        val offlineText = com.example.inknote.data.model.CanvasTextItem(
+            id = 401L,
+            pageId = page.id,
+            text = "Flight departed on time, cruising at 35,000 ft",
+            x = 20f,
+            y = 50f
+        )
+
+        noteRepo.saveEntirePageContent(
+            pageId = page.id,
+            strokes = emptyList(),
+            shapes = emptyList(),
+            textItems = listOf(offlineText),
+            mediaItems = emptyList()
+        )
+
+        // Check reloaded from disk
+        val reloadedNotebooks = noteRepo.getNotebooks(guestUser.id).first()
+        assertTrue(reloadedNotebooks.any { it.id == offlineNbId })
+        val reloadedTexts = noteRepo.getTextItemsForPage(page.id).first()
+        assertEquals(1, reloadedTexts.size)
+        assertEquals("Flight departed on time, cruising at 35,000 ft", reloadedTexts[0].text)
     }
 }

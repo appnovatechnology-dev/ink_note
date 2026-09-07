@@ -16,6 +16,7 @@ import com.example.inknote.audio.AudioRecorderManager
 import com.example.inknote.audio.TranscriptionManager
 import com.example.inknote.audio.TranscriptionResult
 import com.example.inknote.data.ai.*
+import com.example.inknote.data.auth.AuthRepository
 import com.example.inknote.data.db.entities.AudioRecordingEntity
 import com.example.inknote.data.db.entities.FlashcardEntity
 import com.example.inknote.data.db.entities.NotebookEntity
@@ -29,6 +30,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.io.File
 import java.io.FileOutputStream
+import android.util.Log
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -47,6 +49,12 @@ data class PageDataState(
     val mediaItems: List<CanvasMediaItem> = emptyList()
 )
 
+enum class SaveStatus {
+    SAVED,
+    SAVING,
+    ERROR
+}
+
 data class NoteCanvasUiState(
     val notebook: NotebookEntity? = null,
     val pages: List<PageEntity> = emptyList(),
@@ -57,6 +65,11 @@ data class NoteCanvasUiState(
     val textItems: List<CanvasTextItem> = emptyList(),
     val mediaItems: List<CanvasMediaItem> = emptyList(),
     val recordings: List<AudioRecordingEntity> = emptyList(),
+
+    // Continuous Auto-Save Status
+    val saveStatus: SaveStatus = SaveStatus.SAVED,
+    val lastSavedTimeMillis: Long = System.currentTimeMillis(),
+    val saveErrorMessage: String? = null,
 
     // Tool Settings
     val activeTool: ToolType = ToolType.PEN,
@@ -142,6 +155,8 @@ enum class EraserMode {
 
 class NoteCanvasViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = NoteRepository.getInstance(application)
+    private val authRepository = AuthRepository.getInstance(application)
+    private val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val recorderManager = AudioRecorderManager(application)
     val playerManager = AudioPlayerManager()
     val transcriptionManager = TranscriptionManager(application)
@@ -1302,25 +1317,72 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         scheduleAutoSave()
     }
 
-    // Auto-Save Continuous Engine
+    // Continuous Auto-Save Engine
     private val pageSaveJobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
     fun scheduleAutoSaveForPage(pageId: Long) {
+        _uiState.update { it.copy(saveStatus = SaveStatus.SAVING) }
         pageSaveJobs[pageId]?.cancel()
-        val job = viewModelScope.launch {
-            delay(350)
-            savePageImmediately(pageId)
+        val job = persistenceScope.launch {
+            delay(200) // Highly responsive continuous auto-save
+            savePageInternal(pageId)
         }
         pageSaveJobs[pageId] = job
     }
 
     fun savePageImmediately(pageId: Long) {
+        flushPage(pageId)
+    }
+
+    fun saveCurrentPageImmediately(manual: Boolean = false) {
+        val page = currentPage ?: return
+        flushPage(page.id, manual = manual)
+    }
+
+    fun flushAllPages() {
+        val pageIds = _uiState.value.pagesData.keys.toList()
+        pageIds.forEach { pageId ->
+            flushPage(pageId, manual = false)
+        }
+    }
+
+    fun flushPage(pageId: Long, manual: Boolean = false) {
+        pageSaveJobs[pageId]?.cancel()
+        persistenceScope.launch {
+            withContext(NonCancellable) {
+                savePageInternal(pageId)
+            }
+        }
+    }
+
+    private suspend fun savePageInternal(pageId: Long) {
         val pageData = _uiState.value.pagesData[pageId] ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            repository.saveStrokesForPage(pageId, pageData.strokes)
-            repository.saveShapesForPage(pageId, pageData.shapes)
-            repository.saveTextItemsForPage(pageId, pageData.textItems)
-            repository.saveMediaItemsForPage(pageId, pageData.mediaItems)
+        try {
+            _uiState.update { it.copy(saveStatus = SaveStatus.SAVING) }
+            repository.saveEntirePageContent(
+                pageId = pageId,
+                strokes = pageData.strokes,
+                shapes = pageData.shapes,
+                textItems = pageData.textItems,
+                mediaItems = pageData.mediaItems
+            )
+            _uiState.update {
+                it.copy(
+                    saveStatus = SaveStatus.SAVED,
+                    lastSavedTimeMillis = System.currentTimeMillis(),
+                    saveErrorMessage = null
+                )
+            }
+            Log.d("NoteCanvasViewModel", "Auto-saved page $pageId (${pageData.strokes.size} strokes) successfully")
+            authRepository.triggerSync()
+        } catch (e: Exception) {
+            Log.e("NoteCanvasViewModel", "Auto-save failed for page $pageId", e)
+            _uiState.update {
+                it.copy(
+                    saveStatus = SaveStatus.ERROR,
+                    saveErrorMessage = e.message ?: "Failed to write note changes to disk."
+                )
+            }
         }
     }
 
@@ -1330,16 +1392,11 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
             scheduleAutoSaveForPage(currentId)
         } else {
             autoSaveJob?.cancel()
-            autoSaveJob = viewModelScope.launch {
-                delay(350)
+            autoSaveJob = persistenceScope.launch {
+                delay(200)
                 saveCurrentPageImmediately()
             }
         }
-    }
-
-    fun saveCurrentPageImmediately() {
-        val page = currentPage ?: return
-        savePageImmediately(page.id)
     }
 
     fun updatePageData(
@@ -1527,7 +1584,7 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
 
     override fun onCleared() {
         super.onCleared()
-        saveCurrentPageImmediately()
+        flushAllPages()
         recorderManager.stopRecording()
         playerManager.stop()
     }

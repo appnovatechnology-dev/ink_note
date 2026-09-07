@@ -3,6 +3,7 @@ package com.example.inknote.ui.canvas
 import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -24,6 +25,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.inknote.data.model.ToolType
 import com.example.inknote.ui.canvas.components.*
@@ -37,8 +41,30 @@ fun NoteCanvasScreen(
     onNavigateBack: () -> Unit
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Persist immediately on lifecycle events (ON_PAUSE, ON_STOP) and disposal
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                viewModel.flushAllPages()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.flushAllPages()
+        }
+    }
+
+    // Intercept back action to guarantee note data is flushed to local DB
+    BackHandler {
+        viewModel.flushAllPages()
+        onNavigateBack()
+    }
 
     LaunchedEffect(notebookId) {
         viewModel.initNotebook(notebookId)
@@ -87,6 +113,7 @@ fun NoteCanvasScreen(
     var isFitToScreen by remember { mutableStateOf(false) }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             Column {
                 CanvasTopAppBar(
@@ -95,9 +122,17 @@ fun NoteCanvasScreen(
                     canRedo = uiState.canRedo,
                     isPalmRejectionActive = uiState.isPalmRejectionEnabled,
                     isLocked = uiState.notebook?.isLocked == true,
+                    saveStatus = uiState.saveStatus,
+                    saveErrorMessage = uiState.saveErrorMessage,
                     onBack = {
-                        viewModel.saveCurrentPageImmediately()
+                        viewModel.flushAllPages()
                         onNavigateBack()
+                    },
+                    onSave = {
+                        viewModel.saveCurrentPageImmediately(manual = true)
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("Note saved to device ✓")
+                        }
                     },
                     onUndo = { viewModel.undo() },
                     onRedo = { viewModel.redo() },

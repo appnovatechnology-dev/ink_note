@@ -83,8 +83,10 @@ class AuthRepository private constructor(private val context: Context) {
                         .putString("active_user_email", userEmail)
                         .apply()
                     _currentUser.value = syncedUser
-                    syncManager.pullFromCloud(syncedUser)
                     _isInitialized.value = true
+                    repositoryScope.launch {
+                        syncManager.pullFromCloud(syncedUser)
+                    }
                     return@withContext
                 }
             } catch (e: Exception) {
@@ -96,8 +98,10 @@ class AuthRepository private constructor(private val context: Context) {
             val user = db.userAccountDao().getUserById(savedUserId)
             if (user != null) {
                 _currentUser.value = user
-                syncManager.pullFromCloud(user)
                 _isInitialized.value = true
+                repositoryScope.launch {
+                    syncManager.pullFromCloud(user)
+                }
                 return@withContext
             }
         }
@@ -119,7 +123,11 @@ class AuthRepository private constructor(private val context: Context) {
                 }
             if (user != null) {
                 _currentUser.value = user
-                syncManager.pullFromCloud(user)
+                _isInitialized.value = true
+                repositoryScope.launch {
+                    syncManager.pullFromCloud(user)
+                }
+                return@withContext
             }
         }
         _isInitialized.value = true
@@ -319,6 +327,31 @@ class AuthRepository private constructor(private val context: Context) {
             .remove("active_user_email")
             .apply()
         _currentUser.value = null
+    }
+
+    suspend fun continueAsGuest(): Result<UserAccountEntity> = withContext(Dispatchers.IO) {
+        val guestId = "local_guest_user"
+        val guestEmail = "guest@inknote.local"
+        var guestUser = db.userAccountDao().getUserById(guestId)
+        if (guestUser == null) {
+            guestUser = UserAccountEntity(
+                id = guestId,
+                email = guestEmail,
+                displayName = "Local User",
+                passwordHash = "",
+                avatarColorHex = "#6366F1",
+                createdAt = System.currentTimeMillis(),
+                lastLoginAt = System.currentTimeMillis()
+            )
+            db.userAccountDao().insertUser(guestUser)
+            noteRepository.initializeDefaultDataForUser(guestId)
+        }
+        prefs.edit()
+            .putString("active_user_id", guestId)
+            .putString("active_user_email", guestEmail)
+            .apply()
+        _currentUser.value = guestUser
+        Result.success(guestUser)
     }
 
     fun triggerSync() {

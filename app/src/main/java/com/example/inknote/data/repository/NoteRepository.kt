@@ -3,6 +3,7 @@ package com.example.inknote.data.repository
 import android.content.Context
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.room.withTransaction
 import com.example.inknote.data.db.AppDatabase
 import com.example.inknote.data.db.entities.*
 import com.example.inknote.data.model.*
@@ -337,6 +338,113 @@ class NoteRepository(private val database: AppDatabase) {
                     audioTimestampMs = item.audioTimestampMs
                 )
             )
+        }
+    }
+
+    suspend fun saveEntirePageContent(
+        pageId: Long,
+        strokes: List<VectorStroke>,
+        shapes: List<GeometricShape>,
+        textItems: List<CanvasTextItem>,
+        mediaItems: List<CanvasMediaItem>,
+        userId: String = ""
+    ) = withContext(Dispatchers.IO) {
+        val page = database.pageDao().getPageById(pageId)
+        val resolvedUserId = if (userId.isNotEmpty()) userId else (page?.userId ?: "")
+
+        val strokeEntities = strokes.mapIndexed { index, stroke ->
+            StrokeEntity(
+                userId = resolvedUserId,
+                pageId = pageId,
+                toolType = stroke.toolType.name,
+                colorArgb = stroke.color.toArgb().toLong() and 0xFFFFFFFFL,
+                strokeWidth = stroke.strokeWidth,
+                alpha = stroke.alpha,
+                pointsJson = stroke.toSerializedPoints(),
+                audioTimestampMs = stroke.audioTimestampMs,
+                orderIndex = index
+            )
+        }
+
+        val shapeEntities = shapes.mapIndexed { index, shape ->
+            ShapeEntity(
+                userId = resolvedUserId,
+                pageId = pageId,
+                shapeType = shape.shapeType.name,
+                startX = shape.startX,
+                startY = shape.startY,
+                endX = shape.endX,
+                endY = shape.endY,
+                strokeColorArgb = shape.strokeColor.toArgb().toLong() and 0xFFFFFFFFL,
+                fillColorArgb = shape.fillColor.toArgb().toLong() and 0xFFFFFFFFL,
+                strokeWidth = shape.strokeWidth,
+                rotationDegrees = shape.rotationDegrees,
+                isFilled = shape.isFilled,
+                sideCount = shape.sideCount,
+                audioTimestampMs = shape.audioTimestampMs,
+                orderIndex = index
+            )
+        }
+
+        val textEntities = textItems.map { item ->
+            TextItemEntity(
+                userId = resolvedUserId,
+                pageId = pageId,
+                text = item.text,
+                x = item.x,
+                y = item.y,
+                width = item.width,
+                height = item.height,
+                fontSize = item.fontSize,
+                fontColorArgb = item.fontColor.toArgb().toLong() and 0xFFFFFFFFL,
+                isBold = item.isBold,
+                isItalic = item.isItalic,
+                backgroundColorArgb = item.backgroundColor.toArgb().toLong() and 0xFFFFFFFFL,
+                audioTimestampMs = item.audioTimestampMs,
+                isMathFormula = item.isMathFormula,
+                linkNotebookId = item.linkNotebookId,
+                linkNotebookTitle = item.linkNotebookTitle
+            )
+        }
+
+        val mediaEntities = mediaItems.map { media ->
+            MediaItemEntity(
+                userId = resolvedUserId,
+                pageId = pageId,
+                localUri = media.localUri,
+                x = media.x,
+                y = media.y,
+                width = media.width,
+                height = media.height,
+                rotationDegrees = media.rotationDegrees,
+                audioTimestampMs = media.audioTimestampMs
+            )
+        }
+
+        database.withTransaction {
+            database.strokeDao().clearStrokesForPage(pageId)
+            if (strokeEntities.isNotEmpty()) {
+                database.strokeDao().insertStrokes(strokeEntities)
+            }
+            database.shapeDao().clearShapesForPage(pageId)
+            if (shapeEntities.isNotEmpty()) {
+                database.shapeDao().insertShapes(shapeEntities)
+            }
+            database.textItemDao().clearTextForPage(pageId)
+            if (textEntities.isNotEmpty()) {
+                database.textItemDao().insertTextItems(textEntities)
+            }
+            database.mediaItemDao().clearMediaForPage(pageId)
+            if (mediaEntities.isNotEmpty()) {
+                database.mediaItemDao().insertMediaItems(mediaEntities)
+            }
+            if (page != null) {
+                database.pageDao().updatePage(page.copy(updatedAt = System.currentTimeMillis()))
+                val nb = database.notebookDao().getNotebookById(page.notebookId)
+                if (nb != null) {
+                    database.notebookDao().updateNotebook(nb.copy(updatedAt = System.currentTimeMillis()))
+                }
+            }
         }
     }
 

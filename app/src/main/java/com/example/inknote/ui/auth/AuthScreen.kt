@@ -475,6 +475,33 @@ fun AuthScreen(
                             )
                         )
                     }
+
+                    // Continue Offline / Local mode
+                    TextButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                isLoading = true
+                                val res = authRepository.continueAsGuest()
+                                isLoading = false
+                                res.onSuccess {
+                                    onAuthSuccess()
+                                }
+                            }
+                        },
+                        modifier = Modifier.testTag("button_continue_guest")
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.OfflinePin, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Continue Offline (Local Storage)",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = Color(0xFF94A3B8),
+                                    fontWeight = FontWeight.Medium
+                                )
+                            )
+                        }
+                    }
                 }
             }
 
