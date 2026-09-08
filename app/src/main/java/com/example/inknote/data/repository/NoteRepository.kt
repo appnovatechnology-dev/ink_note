@@ -174,6 +174,7 @@ class NoteRepository(private val database: AppDatabase) {
         }
         val entities = strokes.mapIndexed { index, stroke ->
             StrokeEntity(
+                id = if (stroke.id != 0L) stroke.id else 0L,
                 userId = resolvedUserId,
                 pageId = pageId,
                 toolType = stroke.toolType.name,
@@ -354,6 +355,7 @@ class NoteRepository(private val database: AppDatabase) {
 
         val strokeEntities = strokes.mapIndexed { index, stroke ->
             StrokeEntity(
+                id = if (stroke.id != 0L) stroke.id else 0L,
                 userId = resolvedUserId,
                 pageId = pageId,
                 toolType = stroke.toolType.name,
@@ -368,6 +370,7 @@ class NoteRepository(private val database: AppDatabase) {
 
         val shapeEntities = shapes.mapIndexed { index, shape ->
             ShapeEntity(
+                id = if (shape.id != 0L) shape.id else 0L,
                 userId = resolvedUserId,
                 pageId = pageId,
                 shapeType = shape.shapeType.name,
@@ -388,6 +391,7 @@ class NoteRepository(private val database: AppDatabase) {
 
         val textEntities = textItems.map { item ->
             TextItemEntity(
+                id = if (item.id != 0L) item.id else 0L,
                 userId = resolvedUserId,
                 pageId = pageId,
                 text = item.text,
@@ -409,6 +413,7 @@ class NoteRepository(private val database: AppDatabase) {
 
         val mediaEntities = mediaItems.map { media ->
             MediaItemEntity(
+                id = if (media.id != 0L) media.id else 0L,
                 userId = resolvedUserId,
                 pageId = pageId,
                 localUri = media.localUri,

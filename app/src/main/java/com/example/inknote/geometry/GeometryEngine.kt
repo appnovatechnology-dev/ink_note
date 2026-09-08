@@ -297,4 +297,129 @@ object GeometryEngine {
         }
         return corners
     }
+
+    /**
+     * Standard Ray-Casting algorithm for point-in-polygon containment test.
+     */
+    fun isPointInPolygon(px: Float, py: Float, polygon: List<androidx.compose.ui.geometry.Offset>): Boolean {
+        if (polygon.size < 3) return false
+        var inside = false
+        var j = polygon.size - 1
+        for (i in polygon.indices) {
+            val xi = polygon[i].x
+            val yi = polygon[i].y
+            val xj = polygon[j].x
+            val yj = polygon[j].y
+
+            val intersect = ((yi > py) != (yj > py)) &&
+                    (px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            if (intersect) inside = !inside
+            j = i
+        }
+        return inside
+    }
+
+    fun computePolygonBounds(polygon: List<androidx.compose.ui.geometry.Offset>): androidx.compose.ui.geometry.Rect {
+        if (polygon.isEmpty()) return androidx.compose.ui.geometry.Rect.Zero
+        var minX = Float.MAX_VALUE
+        var maxX = Float.MIN_VALUE
+        var minY = Float.MAX_VALUE
+        var maxY = Float.MIN_VALUE
+        polygon.forEach { p ->
+            minX = kotlin.math.min(minX, p.x)
+            maxX = kotlin.math.max(maxX, p.x)
+            minY = kotlin.math.min(minY, p.y)
+            maxY = kotlin.math.max(maxY, p.y)
+        }
+        return androidx.compose.ui.geometry.Rect(minX, minY, maxX, maxY)
+    }
+
+    /**
+     * Accurately determines whether a stroke is captured by the lasso polygon.
+     * Prevents accidental selection of adjacent or surrounding strokes.
+     */
+    fun isStrokeSelectedByLasso(
+        stroke: com.example.inknote.data.model.VectorStroke,
+        polygon: List<androidx.compose.ui.geometry.Offset>,
+        polyBounds: androidx.compose.ui.geometry.Rect = computePolygonBounds(polygon)
+    ): Boolean {
+        if (stroke.points.isEmpty()) return false
+
+        var sMinX = Float.MAX_VALUE
+        var sMaxX = Float.MIN_VALUE
+        var sMinY = Float.MAX_VALUE
+        var sMaxY = Float.MIN_VALUE
+        stroke.points.forEach { p ->
+            sMinX = min(sMinX, p.x)
+            sMaxX = max(sMaxX, p.x)
+            sMinY = min(sMinY, p.y)
+            sMaxY = max(sMaxY, p.y)
+        }
+        val strokeBounds = androidx.compose.ui.geometry.Rect(sMinX, sMinY, sMaxX, sMaxY)
+        if (!polyBounds.overlaps(strokeBounds)) return false
+
+        // For dots or very short strokes (e.g. periods, i-dots)
+        if (stroke.points.size <= 3) {
+            return stroke.points.any { isPointInPolygon(it.x, it.y, polygon) }
+        }
+
+        // Check center of bounding box
+        val cx = (sMinX + sMaxX) / 2f
+        val cy = (sMinY + sMaxY) / 2f
+        if (isPointInPolygon(cx, cy, polygon)) return true
+
+        // Sample points across stroke
+        val sampleCount = min(stroke.points.size, 12)
+        val step = max(1, stroke.points.size / sampleCount)
+        var insideCount = 0
+        var totalSampled = 0
+        for (i in 0 until stroke.points.size step step) {
+            val pt = stroke.points[i]
+            totalSampled++
+            if (isPointInPolygon(pt.x, pt.y, polygon)) {
+                insideCount++
+            }
+        }
+        return totalSampled > 0 && (insideCount.toFloat() / totalSampled.toFloat()) >= 0.35f
+    }
+
+    /**
+     * Determines whether a geometric shape is captured by the lasso polygon.
+     */
+    fun isShapeSelectedByLasso(
+        shape: com.example.inknote.data.model.GeometricShape,
+        polygon: List<androidx.compose.ui.geometry.Offset>,
+        polyBounds: androidx.compose.ui.geometry.Rect = computePolygonBounds(polygon)
+    ): Boolean {
+        val sMinX = min(shape.startX, shape.endX)
+        val sMaxX = max(shape.startX, shape.endX)
+        val sMinY = min(shape.startY, shape.endY)
+        val sMaxY = max(shape.startY, shape.endY)
+        val shapeBounds = androidx.compose.ui.geometry.Rect(sMinX, sMinY, sMaxX, sMaxY)
+        if (!polyBounds.overlaps(shapeBounds)) return false
+
+        val cx = (shape.startX + shape.endX) / 2f
+        val cy = (shape.startY + shape.endY) / 2f
+        if (isPointInPolygon(cx, cy, polygon)) return true
+        if (isPointInPolygon(shape.startX, shape.startY, polygon) && isPointInPolygon(shape.endX, shape.endY, polygon)) return true
+        return false
+    }
+
+    /**
+     * Determines whether a text annotation box is captured by the lasso polygon.
+     */
+    fun isTextSelectedByLasso(
+        item: com.example.inknote.data.model.CanvasTextItem,
+        polygon: List<androidx.compose.ui.geometry.Offset>,
+        polyBounds: androidx.compose.ui.geometry.Rect = computePolygonBounds(polygon)
+    ): Boolean {
+        val textBounds = androidx.compose.ui.geometry.Rect(item.x, item.y, item.x + item.width, item.y + 60f)
+        if (!polyBounds.overlaps(textBounds)) return false
+
+        val cx = item.x + item.width / 2f
+        val cy = item.y + 30f
+        if (isPointInPolygon(cx, cy, polygon)) return true
+        if (isPointInPolygon(item.x, item.y, polygon) && isPointInPolygon(item.x + item.width, item.y + 60f, polygon)) return true
+        return false
+    }
 }

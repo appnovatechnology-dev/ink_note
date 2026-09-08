@@ -241,6 +241,9 @@ fun NoteCanvasScreen(
                         isFitToScreen = isFitToScreen,
                         hasLassoSelection = if (isCurrentActivePage) uiState.hasSelection else false,
                         lassoSelectionBounds = if (isCurrentActivePage) uiState.lassoSelectionBounds else null,
+                        selectedStrokeIds = if (isCurrentActivePage) uiState.lassoSelectedStrokes.map { it.id }.toSet() else emptySet(),
+                        selectedShapeIds = if (isCurrentActivePage) uiState.lassoSelectedShapes.map { it.id }.toSet() else emptySet(),
+                        selectedTextIds = if (isCurrentActivePage) uiState.lassoSelectedTextItems.map { it.id }.toSet() else emptySet(),
                         onPinchZoom = { delta ->
                             isFitToScreen = false
                             zoomScale = (zoomScale * delta).coerceIn(0.5f, 3.5f)
@@ -257,6 +260,7 @@ fun NoteCanvasScreen(
                         onLassoComplete = { viewModel.handleLassoSelection(it) },
                         onStartMoveLasso = { viewModel.startMovingLassoSelection() },
                         onMoveLasso = { dx, dy -> viewModel.moveLassoSelection(dx, dy) },
+                        onCommitMoveLasso = { dx, dy -> viewModel.commitLassoMove(dx, dy) },
                         onFinishMoveLasso = { viewModel.finishMovingLassoSelection() },
                         onDuplicateLasso = { viewModel.duplicateLassoSelection() },
                         onDeleteLasso = { viewModel.deleteLassoSelection() },

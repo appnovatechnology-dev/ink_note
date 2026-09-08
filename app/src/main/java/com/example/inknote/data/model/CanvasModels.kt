@@ -2,6 +2,12 @@ package com.example.inknote.data.model
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import java.util.concurrent.atomic.AtomicLong
+
+object IdGenerator {
+    private val counter = AtomicLong(System.currentTimeMillis().coerceAtLeast(1L) * 1000L)
+    fun nextId(): Long = counter.incrementAndGet()
+}
 
 enum class ToolType {
     PEN,
@@ -47,7 +53,7 @@ data class StrokePoint(
 )
 
 data class VectorStroke(
-    val id: Long = 0,
+    val id: Long = IdGenerator.nextId(),
     val pageId: Long = 0,
     val toolType: ToolType = ToolType.PEN,
     val color: Color = Color(0xFF1E293B),
@@ -126,7 +132,7 @@ data class VectorStroke(
 }
 
 data class GeometricShape(
-    val id: Long = 0,
+    val id: Long = IdGenerator.nextId(),
     val pageId: Long = 0,
     val shapeType: ShapeType = ShapeType.RECTANGLE,
     val startX: Float = 0f,
@@ -206,7 +212,7 @@ data class GeometricShape(
 }
 
 data class CanvasTextItem(
-    val id: Long = 0,
+    val id: Long = IdGenerator.nextId(),
     val pageId: Long = 0,
     val text: String = "",
     val x: Float = 50f,
@@ -281,7 +287,7 @@ data class CanvasTextItem(
 }
 
 data class CanvasMediaItem(
-    val id: Long = 0,
+    val id: Long = IdGenerator.nextId(),
     val pageId: Long = 0,
     val localUri: String = "",
     val x: Float = 50f,

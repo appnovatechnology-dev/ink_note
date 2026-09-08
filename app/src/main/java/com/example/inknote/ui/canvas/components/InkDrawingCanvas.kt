@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -79,10 +80,14 @@ fun InkDrawingCanvas(
     isFitToScreen: Boolean = false,
     hasLassoSelection: Boolean = false,
     lassoSelectionBounds: Rect? = null,
+    selectedStrokeIds: Set<Long> = emptySet(),
+    selectedShapeIds: Set<Long> = emptySet(),
+    selectedTextIds: Set<Long> = emptySet(),
     onLassoComplete: ((List<Offset>) -> Unit)? = null,
     onStartMoveLasso: (() -> Unit)? = null,
     onMoveLasso: ((Float, Float) -> Unit)? = null,
     onFinishMoveLasso: (() -> Unit)? = null,
+    onCommitMoveLasso: ((Float, Float) -> Unit)? = null,
     onDuplicateLasso: (() -> Unit)? = null,
     onDeleteLasso: (() -> Unit)? = null,
     onClearLasso: (() -> Unit)? = null,
@@ -105,6 +110,17 @@ fun InkDrawingCanvas(
     var shapeDragStart by remember { mutableStateOf<Offset?>(null) }
     var shapeDragCurrent by remember { mutableStateOf<Offset?>(null) }
     val stylusInputState = remember { StylusInputState() }
+
+    // Lightweight live drag state for 60/120fps hardware-accelerated preview
+    var dragDeltaPage by remember { mutableStateOf(Offset.Zero) }
+    var isDraggingSelection by remember { mutableStateOf(false) }
+
+    LaunchedEffect(hasLassoSelection, lassoSelectionBounds) {
+        if (!hasLassoSelection) {
+            dragDeltaPage = Offset.Zero
+            isDraggingSelection = false
+        }
+    }
 
     LaunchedEffect(activeTool, penColor, highlighterColor, activeShapeType, shapeStrokeColor, shapeFillColor) {
         liveStrokePoints = emptyList()
@@ -382,7 +398,15 @@ fun InkDrawingCanvas(
 
             // 2. Shapes
             shapes.forEach { shape ->
-                drawGeometricShape(shape, scaleFactor)
+                if (isDraggingSelection && selectedShapeIds.contains(shape.id)) {
+                    withTransform({
+                        translate(dragDeltaPage.x * scaleFactor, dragDeltaPage.y * scaleFactor)
+                    }) {
+                        drawGeometricShape(shape, scaleFactor)
+                    }
+                } else {
+                    drawGeometricShape(shape, scaleFactor)
+                }
             }
 
             // 3. Vector Strokes
@@ -390,7 +414,15 @@ fun InkDrawingCanvas(
                 val isHighlightedByAudio = isPlayingAudio && stroke.audioTimestampMs != null &&
                         abs(playbackCurrentMs - stroke.audioTimestampMs) < 1500
 
-                drawVectorStroke(stroke, scaleFactor, isHighlightedByAudio)
+                if (isDraggingSelection && selectedStrokeIds.contains(stroke.id)) {
+                    withTransform({
+                        translate(dragDeltaPage.x * scaleFactor, dragDeltaPage.y * scaleFactor)
+                    }) {
+                        drawVectorStroke(stroke, scaleFactor, false)
+                    }
+                } else {
+                    drawVectorStroke(stroke, scaleFactor, isHighlightedByAudio)
+                }
             }
 
             // 4. Live Stroke in progress
@@ -420,11 +452,11 @@ fun InkDrawingCanvas(
                 )
             }
 
-            if (hasLassoSelection && lassoSelectionBounds != null) {
+            if (hasLassoSelection && lassoSelectionBounds != null && !isDraggingSelection) {
                 val b = lassoSelectionBounds
                 val rect = Rect(b.left * scaleFactor, b.top * scaleFactor, b.right * scaleFactor, b.bottom * scaleFactor)
                 drawRect(
-                    color = Color(0x226366F1),
+                    color = Color(0x186366F1),
                     topLeft = Offset(rect.left, rect.top),
                     size = Size(rect.width, rect.height),
                     style = Fill
@@ -460,112 +492,135 @@ fun InkDrawingCanvas(
         // 2. Floating Lasso Quick Action Pill & Draggable Selection Box
         if (hasLassoSelection && lassoSelectionBounds != null) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val density = LocalDensity.current.density
                 val scaleX = maxWidth.value / pageWidth
                 val scaleY = maxHeight.value / pageHeight
                 val b = lassoSelectionBounds
 
-                val boxLeft = (b.left * scaleX).dp
-                val boxTop = (b.top * scaleY).dp
-                val boxWidth = (b.width * scaleX).coerceAtLeast(36f).dp
-                val boxHeight = (b.height * scaleY).coerceAtLeast(36f).dp
+                val effectiveLeft = b.left + dragDeltaPage.x
+                val effectiveTop = b.top + dragDeltaPage.y
+
+                val boxLeft = (effectiveLeft * scaleX).dp
+                val boxTop = (effectiveTop * scaleY).dp
+                val boxWidth = (b.width * scaleX).coerceAtLeast(44f).dp
+                val boxHeight = (b.height * scaleY).coerceAtLeast(44f).dp
 
                 // Draggable selection box overlay
                 Box(
                     modifier = Modifier
                         .offset(x = boxLeft, y = boxTop)
                         .size(boxWidth, boxHeight)
-                        .border(2.dp, Color(0xFF4F46E5), RoundedCornerShape(6.dp))
-                        .background(Color(0x184F46E5), RoundedCornerShape(6.dp))
+                        .border(2.dp, Color(0xFF4F46E5), RoundedCornerShape(8.dp))
+                        .background(Color(0x184F46E5), RoundedCornerShape(8.dp))
                         .pointerInput(b) {
                             detectDragGestures(
                                 onDragStart = {
+                                    isDraggingSelection = true
+                                    dragDeltaPage = Offset.Zero
                                     onStartMoveLasso?.invoke()
                                 },
                                 onDrag = { change, dragAmount ->
                                     change.consume()
-                                    val deltaX = dragAmount.x * (pageWidth / size.width)
-                                    val deltaY = dragAmount.y * (pageHeight / size.height)
-                                    onMoveLasso?.invoke(deltaX, deltaY)
+                                    val deltaPageX = (dragAmount.x / density) / scaleX
+                                    val deltaPageY = (dragAmount.y / density) / scaleY
+                                    dragDeltaPage += Offset(deltaPageX, deltaPageY)
                                 },
                                 onDragEnd = {
+                                    val totalX = dragDeltaPage.x
+                                    val totalY = dragDeltaPage.y
+                                    dragDeltaPage = Offset.Zero
+                                    isDraggingSelection = false
+                                    if (abs(totalX) > 0.5f || abs(totalY) > 0.5f) {
+                                        if (onCommitMoveLasso != null) {
+                                            onCommitMoveLasso(totalX, totalY)
+                                        } else {
+                                            onMoveLasso?.invoke(totalX, totalY)
+                                        }
+                                    }
                                     onFinishMoveLasso?.invoke()
                                 },
                                 onDragCancel = {
+                                    dragDeltaPage = Offset.Zero
+                                    isDraggingSelection = false
                                     onFinishMoveLasso?.invoke()
                                 }
                             )
                         }
                 ) {
                     // Central Move icon indicator badge
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .background(Color(0xDD4F46E5), CircleShape)
-                            .padding(6.dp)
+                    Surface(
+                        modifier = Modifier.align(Alignment.Center),
+                        shape = CircleShape,
+                        color = Color(0xEE4F46E5),
+                        shadowElevation = 4.dp
                     ) {
-                        Icon(
-                            Icons.Default.OpenWith,
-                            contentDescription = "Drag to Move",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
+                        Box(modifier = Modifier.padding(6.dp)) {
+                            Icon(
+                                Icons.Default.OpenWith,
+                                contentDescription = "Drag to Move",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
 
-                // Floating Action Bar above or below the selection
-                val pillX = (b.left * scaleX).coerceIn(8f, (maxWidth.value - 260f).coerceAtLeast(8f)).dp
-                val pillY = if ((b.top * scaleY) > 56f) {
-                    ((b.top * scaleY) - 52f).dp
-                } else {
-                    ((b.bottom * scaleY) + 8f).dp
-                }
+                // Floating Action Bar above or below the selection (hidden while dragging)
+                if (!isDraggingSelection) {
+                    val pillX = (effectiveLeft * scaleX).coerceIn(8f, (maxWidth.value - 260f).coerceAtLeast(8f)).dp
+                    val pillY = if ((effectiveTop * scaleY) > 56f) {
+                        ((effectiveTop * scaleY) - 52f).dp
+                    } else {
+                        (((effectiveTop + b.height) * scaleY) + 8f).dp
+                    }
 
-                Surface(
-                    modifier = Modifier
-                        .offset(x = pillX, y = pillY)
-                        .shadow(6.dp, RoundedCornerShape(20.dp)),
-                    shape = RoundedCornerShape(20.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 6.dp
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    Surface(
+                        modifier = Modifier
+                            .offset(x = pillX, y = pillY)
+                            .shadow(6.dp, RoundedCornerShape(20.dp)),
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 6.dp
                     ) {
-                        IconButton(
-                            onClick = { onDuplicateLasso?.invoke() },
-                            modifier = Modifier.size(34.dp)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(18.dp))
-                        }
-                        IconButton(
-                            onClick = { onDeleteLasso?.invoke() },
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
-                        }
-                        if (onConvertLassoToText != null) {
                             IconButton(
-                                onClick = { onConvertLassoToText.invoke() },
+                                onClick = { onDuplicateLasso?.invoke() },
                                 modifier = Modifier.size(34.dp)
                             ) {
-                                Icon(Icons.Default.TextFields, contentDescription = "Convert to Text", tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(18.dp))
                             }
-                        }
-                        if (onConvertLassoToMath != null) {
                             IconButton(
-                                onClick = { onConvertLassoToMath.invoke() },
+                                onClick = { onDeleteLasso?.invoke() },
                                 modifier = Modifier.size(34.dp)
                             ) {
-                                Icon(Icons.Default.Calculate, contentDescription = "Convert to Math", tint = Color(0xFF0D9488), modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
                             }
-                        }
-                        IconButton(
-                            onClick = { onClearLasso?.invoke() },
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = "Deselect", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                            if (onConvertLassoToText != null) {
+                                IconButton(
+                                    onClick = { onConvertLassoToText.invoke() },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(Icons.Default.TextFields, contentDescription = "Convert to Text", tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            if (onConvertLassoToMath != null) {
+                                IconButton(
+                                    onClick = { onConvertLassoToMath.invoke() },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(Icons.Default.Calculate, contentDescription = "Convert to Math", tint = Color(0xFF0D9488), modifier = Modifier.size(18.dp))
+                                }
+                            }
+                            IconButton(
+                                onClick = { onClearLasso?.invoke() },
+                                modifier = Modifier.size(34.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Deselect", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                            }
                         }
                     }
                 }
@@ -574,10 +629,13 @@ fun InkDrawingCanvas(
 
         // 3. Text Box Layer
         textItems.forEach { textItem ->
+            val isSelected = selectedTextIds.contains(textItem.id)
+            val dragOffset = if (isDraggingSelection && isSelected) dragDeltaPage else Offset.Zero
             CanvasTextBox(
                 textItem = textItem,
                 pageWidth = pageWidth,
                 pageHeight = pageHeight,
+                dragOffset = dragOffset,
                 isPlayingAudio = isPlayingAudio,
                 playbackCurrentMs = playbackCurrentMs,
                 onUpdate = onUpdateTextItem,
@@ -769,6 +827,7 @@ fun CanvasTextBox(
     textItem: CanvasTextItem,
     pageWidth: Float,
     pageHeight: Float,
+    dragOffset: Offset = Offset.Zero,
     isPlayingAudio: Boolean,
     playbackCurrentMs: Long,
     onUpdate: (CanvasTextItem) -> Unit,
@@ -786,8 +845,10 @@ fun CanvasTextBox(
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val scaleX = maxWidth.value / pageWidth
         val scaleY = maxHeight.value / pageHeight
-        val dpX = (posX * scaleX).dp
-        val dpY = (posY * scaleY).dp
+        val effectiveX = posX + dragOffset.x
+        val effectiveY = posY + dragOffset.y
+        val dpX = (effectiveX * scaleX).dp
+        val dpY = (effectiveY * scaleY).dp
         val dpW = (textItem.width * scaleX).dp
 
         Box(
