@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import com.example.inknote.data.model.CompassState
 import com.example.inknote.data.model.ProtractorState
 import com.example.inknote.data.model.RulerState
+import com.example.inknote.geometry.GeometryEngine
 import kotlin.math.*
 
 @Composable
@@ -72,7 +73,8 @@ fun RulerOverlay(
                 // Two-finger rotate & pan anywhere on the ruler
                 detectTransformGestures { _, pan, _, rotation ->
                     centerPos += pan
-                    currentAngle = (currentAngle + rotation + 360f) % 360f
+                    val raw = (currentAngle + rotation + 360f) % 360f
+                    currentAngle = GeometryEngine.snapAngleMagnetically(raw)
                     onUpdate(centerPos.x, centerPos.y, currentAngle)
                 }
             }
@@ -203,7 +205,8 @@ fun RulerOverlay(
                             val touchScreen = centerPos + Offset(with(density) { (rulerWidthDp / 2 - 26.dp).toPx() } * cosA, with(density) { (rulerWidthDp / 2 - 26.dp).toPx() } * sinA) + change.position
                             val currentTouchAngle = Math.toDegrees(atan2((touchScreen.y - centerPos.y).toDouble(), (touchScreen.x - centerPos.x).toDouble())).toFloat()
                             val delta = currentTouchAngle - dragStartAngle
-                            currentAngle = (initialAngle + delta + 360f) % 360f
+                            val raw = (initialAngle + delta + 360f) % 360f
+                            currentAngle = GeometryEngine.snapAngleMagnetically(raw)
                             onUpdate(centerPos.x, centerPos.y, currentAngle)
                         }
                     )
@@ -269,7 +272,8 @@ fun ProtractorOverlay(
                 // Two-finger rotate & pan gesture
                 detectTransformGestures { _, pan, _, rotation ->
                     centerPos += pan
-                    rotationAngle = (rotationAngle + rotation + 360f) % 360f
+                    val raw = (rotationAngle + rotation + 360f) % 360f
+                    rotationAngle = GeometryEngine.snapAngleMagnetically(raw)
                     onUpdate(centerPos.x, centerPos.y, rotationAngle)
                 }
             }
@@ -305,7 +309,8 @@ fun ProtractorOverlay(
                             val screenTouch = centerPos + Offset(rotX, rotY)
                             val currentTouchAngle = Math.toDegrees(atan2((screenTouch.y - centerPos.y).toDouble(), (screenTouch.x - centerPos.x).toDouble())).toFloat()
                             val delta = currentTouchAngle - dragStartAngle
-                            rotationAngle = (initialRotation + delta + 360f) % 360f
+                            val raw = (initialRotation + delta + 360f) % 360f
+                            rotationAngle = GeometryEngine.snapAngleMagnetically(raw)
                             onUpdate(centerPos.x, centerPos.y, rotationAngle)
                         }
                     )
@@ -488,7 +493,8 @@ fun CompassOverlay(
                 // Two-finger pan & rotate
                 detectTransformGestures { _, pan, _, rotation ->
                     pivot += pan
-                    angle = (angle + rotation + 360f) % 360f
+                    val raw = (angle + rotation + 360f) % 360f
+                    angle = GeometryEngine.snapAngleMagnetically(raw)
                     onUpdate(pivot.x, pivot.y, radius, angle)
                 }
             }

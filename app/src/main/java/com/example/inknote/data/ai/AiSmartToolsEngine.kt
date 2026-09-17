@@ -51,19 +51,38 @@ data class NoteSummaryResult(
 class AiSmartToolsEngine(private val context: Context) {
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
+        .connectTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
         .build()
+
+    private fun isOnline(): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            val network = cm?.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     private val apiKey: String
         get() = try {
-            BuildConfig.GEMINI_API_KEY
+            val fromConfig = BuildConfig.GEMINI_API_KEY
+            if (fromConfig.isNotBlank() && fromConfig != "MY_GEMINI_API_KEY") {
+                fromConfig
+            } else {
+                val userEntered = context.getSharedPreferences("inknote_settings", Context.MODE_PRIVATE)
+                    .getString("gemini_api_key", "")?.trim() ?: ""
+                userEntered
+            }
         } catch (e: Exception) {
             ""
         }
 
     private val isCloudAvailable: Boolean
-        get() = apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY"
+        get() = isOnline() && apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY"
 
     /**
      * Converts handwriting ink strokes to typed text using Gemini AI if configured,
@@ -372,7 +391,7 @@ class AiSmartToolsEngine(private val context: Context) {
     // --- Private Helper Implementations ---
 
     private fun callGeminiApi(prompt: String): String {
-        val model = "gemini-2.5-flash"
+        val model = "gemini-3.5-flash"
         val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
 
         val jsonBody = JSONObject().apply {

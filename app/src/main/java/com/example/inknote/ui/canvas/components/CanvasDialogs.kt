@@ -7,8 +7,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
 import androidx.compose.material.icons.automirrored.filled.Notes
@@ -24,6 +26,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.inknote.data.db.entities.AudioRecordingEntity
+import com.example.inknote.data.db.entities.PageEntity
+import com.example.inknote.util.PageRangeParser
 import com.example.ui.theme.NoteInkColors
 import java.util.Locale
 
@@ -183,28 +187,360 @@ fun ShapePropertiesDialog(
     )
 }
 
+enum class PageSelectionMode {
+    ALL_PAGES,
+    TYPE_RANGE,
+    TAP_TO_SELECT
+}
+
 @Composable
 fun ExportDialog(
     isExporting: Boolean,
-    onExportPdf: () -> Unit,
+    pages: List<PageEntity> = emptyList(),
+    currentPageIndex: Int = 0,
+    onExportPdf: (selectedPageIds: List<Long>) -> Unit,
+    onSaveToDownloads: (selectedPageIds: List<Long>) -> Unit = {},
     onDismiss: () -> Unit
 ) {
+    var selectionMode by remember { mutableStateOf(PageSelectionMode.ALL_PAGES) }
+    var typedRangeText by remember(pages.size) {
+        mutableStateOf(if (pages.isNotEmpty()) "1-${pages.size}" else "1")
+    }
+
+    // Selection state for tap-to-select individual checkboxes
+    val selectedPageMap = remember(pages) {
+        mutableStateMapOf<Long, Boolean>().apply {
+            pages.forEach { put(it.id, true) }
+        }
+    }
+
+    // Live parsing for typed range input
+    val rangeParseResult = remember(typedRangeText, pages.size) {
+        PageRangeParser.parse(typedRangeText, pages.size)
+    }
+
+    // Calculate final selected page IDs and whether export is valid based on mode
+    val finalSelectedPageIds: List<Long> = remember(
+        selectionMode,
+        rangeParseResult,
+        selectedPageMap.toMap(),
+        pages
+    ) {
+        when (selectionMode) {
+            PageSelectionMode.ALL_PAGES -> pages.map { it.id }
+            PageSelectionMode.TYPE_RANGE -> {
+                if (rangeParseResult.isValid) {
+                    rangeParseResult.selectedPageIndices.mapNotNull { pages.getOrNull(it)?.id }
+                } else {
+                    emptyList()
+                }
+            }
+            PageSelectionMode.TAP_TO_SELECT -> {
+                pages.filter { selectedPageMap[it.id] == true }.map { it.id }
+            }
+        }
+    }
+
+    val finalCount = finalSelectedPageIds.size
+    val canExport = when (selectionMode) {
+        PageSelectionMode.ALL_PAGES -> pages.isNotEmpty()
+        PageSelectionMode.TYPE_RANGE -> rangeParseResult.isValid && finalCount > 0
+        PageSelectionMode.TAP_TO_SELECT -> finalCount > 0
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Export & Share Note", fontWeight = FontWeight.Bold) },
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("Export & Save Note", fontWeight = FontWeight.Bold)
+            }
+        },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Text(
-                    "Flatten all handwriting, drawings, geometric shapes, and annotations into a high-quality PDF to share or print fully offline.",
-                    fontSize = 13.sp,
+                    "Export all handwriting, drawings, geometric shapes, and annotations into a vector PDF. Works 100% offline.",
+                    fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                if (pages.size > 1) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            // Section header with live count
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Page Selection", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                if (canExport) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text(
+                                            text = "$finalCount / ${pages.size} selected",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                } else {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text(
+                                            text = "0 / ${pages.size} selected",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.error,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            // 3 Equal alternative modes
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                FilterChip(
+                                    selected = selectionMode == PageSelectionMode.ALL_PAGES,
+                                    onClick = { selectionMode = PageSelectionMode.ALL_PAGES },
+                                    label = { Text("All Pages", fontSize = 11.sp) },
+                                    leadingIcon = if (selectionMode == PageSelectionMode.ALL_PAGES) {
+                                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(13.dp)) }
+                                    } else null
+                                )
+
+                                FilterChip(
+                                    selected = selectionMode == PageSelectionMode.TYPE_RANGE,
+                                    onClick = {
+                                        selectionMode = PageSelectionMode.TYPE_RANGE
+                                        if (typedRangeText.isBlank()) {
+                                            typedRangeText = "1-${pages.size}"
+                                        }
+                                    },
+                                    label = { Text("Type Range", fontSize = 11.sp) },
+                                    leadingIcon = if (selectionMode == PageSelectionMode.TYPE_RANGE) {
+                                        { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(13.dp)) }
+                                    } else null
+                                )
+
+                                FilterChip(
+                                    selected = selectionMode == PageSelectionMode.TAP_TO_SELECT,
+                                    onClick = { selectionMode = PageSelectionMode.TAP_TO_SELECT },
+                                    label = { Text("Tap to Select", fontSize = 11.sp) },
+                                    leadingIcon = if (selectionMode == PageSelectionMode.TAP_TO_SELECT) {
+                                        { Icon(Icons.Default.Checklist, contentDescription = null, modifier = Modifier.size(13.dp)) }
+                                    } else null
+                                )
+                            }
+
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 2.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                            )
+
+                            // Sub-panel based on active mode
+                            when (selectionMode) {
+                                PageSelectionMode.ALL_PAGES -> {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.padding(vertical = 4.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            tint = Color(0xFF16A34A),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text(
+                                            text = "All ${pages.size} pages will be exported in ascending order (Pages 1 to ${pages.size}).",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                PageSelectionMode.TYPE_RANGE -> {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedTextField(
+                                            value = typedRangeText,
+                                            onValueChange = { typedRangeText = it },
+                                            label = { Text("Page Range (e.g. 3-7, 1, 4, 9)", fontSize = 12.sp) },
+                                            placeholder = { Text("e.g. 1, 3-5, 8, 11-14", fontSize = 12.sp) },
+                                            singleLine = true,
+                                            isError = !rangeParseResult.isValid && typedRangeText.isNotBlank(),
+                                            supportingText = {
+                                                if (typedRangeText.isNotBlank() && !rangeParseResult.isValid) {
+                                                    Text(
+                                                        text = rangeParseResult.errorMessage ?: "Invalid page range",
+                                                        color = MaterialTheme.colorScheme.error,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                } else if (rangeParseResult.isValid && typedRangeText.isNotBlank()) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.CheckCircle,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFF16A34A),
+                                                            modifier = Modifier.size(13.dp)
+                                                        )
+                                                        Text(
+                                                            text = rangeParseResult.confirmationText,
+                                                            color = Color(0xFF16A34A),
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+                                                } else {
+                                                    Text("Note has ${pages.size} total pages. Supports ranges and commas.", fontSize = 11.sp)
+                                                }
+                                            },
+                                            trailingIcon = {
+                                                if (typedRangeText.isNotEmpty()) {
+                                                    IconButton(onClick = { typedRangeText = "" }) {
+                                                        Icon(Icons.Default.Clear, contentDescription = "Clear range input", modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+
+                                        // Preset shortcut buttons for typed range
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            AssistChip(
+                                                onClick = { typedRangeText = "1-${pages.size}" },
+                                                label = { Text("All (1-${pages.size})", fontSize = 10.sp) }
+                                            )
+                                            AssistChip(
+                                                onClick = { typedRangeText = "${currentPageIndex + 1}" },
+                                                label = { Text("Page ${currentPageIndex + 1}", fontSize = 10.sp) }
+                                            )
+                                            if (pages.size > 2) {
+                                                val half = (pages.size + 1) / 2
+                                                AssistChip(
+                                                    onClick = { typedRangeText = "1-$half" },
+                                                    label = { Text("1-$half", fontSize = 10.sp) }
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                PageSelectionMode.TAP_TO_SELECT -> {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        // Quick preset buttons
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            val currentId = pages.getOrNull(currentPageIndex)?.id
+                                            val isCurrentOnly = pages.count { selectedPageMap[it.id] == true } == 1 &&
+                                                    currentId != null && selectedPageMap[currentId] == true
+
+                                            FilterChip(
+                                                selected = isCurrentOnly,
+                                                onClick = {
+                                                    pages.forEach { selectedPageMap[it.id] = (it.id == currentId) }
+                                                },
+                                                label = { Text("Page ${currentPageIndex + 1} Only", fontSize = 11.sp) }
+                                            )
+
+                                            val allSelected = pages.all { selectedPageMap[it.id] == true }
+                                            TextButton(
+                                                onClick = {
+                                                    val target = !allSelected
+                                                    pages.forEach { selectedPageMap[it.id] = target }
+                                                },
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(if (allSelected) "Deselect All" else "Select All", fontSize = 11.sp)
+                                            }
+                                        }
+
+                                        // Scrollable checkbox list
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(max = 160.dp)
+                                                .verticalScroll(rememberScrollState()),
+                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            pages.forEachIndexed { index, page ->
+                                                val isChecked = selectedPageMap[page.id] ?: false
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clickable { selectedPageMap[page.id] = !isChecked }
+                                                        .padding(vertical = 2.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Checkbox(
+                                                        checked = isChecked,
+                                                        onCheckedChange = { checked ->
+                                                            selectedPageMap[page.id] = checked
+                                                        },
+                                                        modifier = Modifier.size(32.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(
+                                                        text = "Page ${index + 1}" + if (index == currentPageIndex) " (Current)" else "",
+                                                        fontSize = 12.sp,
+                                                        fontWeight = if (index == currentPageIndex) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if (isExporting) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        modifier = Modifier.padding(vertical = 12.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
                     ) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp))
                         Text("Rendering Vector PDF...", fontSize = 14.sp)
@@ -213,18 +549,85 @@ fun ExportDialog(
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onExportPdf() },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                            .clickable(enabled = canExport) {
+                                onSaveToDownloads(finalSelectedPageIds)
+                            },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (canExport) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                        )
                     ) {
                         Row(
-                            modifier = Modifier.padding(16.dp),
+                            modifier = Modifier.padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(32.dp))
+                            Icon(
+                                Icons.Default.Download,
+                                contentDescription = null,
+                                tint = if (canExport) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.size(26.dp)
+                            )
                             Column {
-                                Text("Export as PDF", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onPrimaryContainer)
-                                Text("High-resolution vector PDF export", fontSize = 12.sp, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
+                                Text(
+                                    "Save PDF to Downloads",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = if (canExport) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
+                                Text(
+                                    if (canExport) {
+                                        "Save $finalCount page${if (finalCount > 1) "s" else ""} to device Downloads"
+                                    } else if (selectionMode == PageSelectionMode.TYPE_RANGE && !rangeParseResult.isValid) {
+                                        rangeParseResult.errorMessage ?: "Please enter a valid page range"
+                                    } else {
+                                        "Select at least 1 page"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = if (canExport) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                    }
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = canExport) {
+                                onExportPdf(finalSelectedPageIds)
+                            },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (canExport) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Share,
+                                contentDescription = null,
+                                tint = if (canExport) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.size(26.dp)
+                            )
+                            Column {
+                                Text(
+                                    "Share PDF",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp,
+                                    color = if (canExport) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
+                                Text(
+                                    if (canExport) {
+                                        "Send $finalCount page${if (finalCount > 1) "s" else ""} via messaging or email"
+                                    } else if (selectionMode == PageSelectionMode.TYPE_RANGE && !rangeParseResult.isValid) {
+                                        rangeParseResult.errorMessage ?: "Please enter a valid page range"
+                                    } else {
+                                        "Select at least 1 page"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = if (canExport) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+                                )
                             }
                         }
                     }
@@ -248,6 +651,7 @@ fun AudioRecordingsListDialog(
     onDeleteRecording: (AudioRecordingEntity) -> Unit,
     onRenameRecording: (AudioRecordingEntity, String) -> Unit,
     onTranscribeRecording: (AudioRecordingEntity) -> Unit,
+    onDownloadRecording: ((AudioRecordingEntity) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     var recordingToRename by remember { mutableStateOf<AudioRecordingEntity?>(null) }
@@ -338,6 +742,14 @@ fun AudioRecordingsListDialog(
                                 }
 
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (onDownloadRecording != null) {
+                                        IconButton(
+                                            onClick = { onDownloadRecording(rec) },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(Icons.Default.Download, contentDescription = "Save to Downloads", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                        }
+                                    }
                                     IconButton(
                                         onClick = { onTranscribeRecording(rec) },
                                         modifier = Modifier.size(32.dp)

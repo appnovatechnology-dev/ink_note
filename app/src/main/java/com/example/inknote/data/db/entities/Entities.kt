@@ -5,27 +5,9 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(
-    tableName = "user_accounts",
-    indices = [Index(value = ["email"], unique = true)]
-)
-data class UserAccountEntity(
-    @PrimaryKey val id: String,
-    val email: String,
-    val displayName: String,
-    val passwordHash: String,
-    val avatarColorHex: String = "#4F46E5",
-    val createdAt: Long = System.currentTimeMillis(),
-    val lastLoginAt: Long = System.currentTimeMillis()
-)
-
-@Entity(
-    tableName = "subjects",
-    indices = [Index("userId")]
-)
+@Entity(tableName = "subjects")
 data class SubjectEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val name: String,
     val colorHex: String = "#4F46E5",
     val sortOrder: Int = 0,
@@ -43,11 +25,10 @@ data class SubjectEntity(
             onDelete = ForeignKey.SET_NULL
         )
     ],
-    indices = [Index("userId"), Index("subjectId")]
+    indices = [Index("subjectId")]
 )
 data class NotebookEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val subjectId: Long? = null,
     val title: String,
     val coverColorHex: String = "#4F46E5",
@@ -73,15 +54,10 @@ data class NotebookEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [
-        Index("userId"),
-        Index("notebookId"),
-        Index(value = ["notebookId", "pageNumber"], unique = true)
-    ]
+    indices = [Index("notebookId"), Index(value = ["notebookId", "pageNumber"], unique = true)]
 )
 data class PageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val notebookId: Long,
     val pageNumber: Int = 1,
     val templateType: String = "BLANK",
@@ -105,11 +81,10 @@ data class PageEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("userId"), Index("pageId")]
+    indices = [Index("pageId")]
 )
 data class StrokeEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val pageId: Long,
     val toolType: String = "PEN",
     val colorArgb: Long = 0xFF1E293BL,
@@ -130,11 +105,10 @@ data class StrokeEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("userId"), Index("pageId")]
+    indices = [Index("pageId")]
 )
 data class ShapeEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val pageId: Long,
     val shapeType: String = "RECTANGLE",
     val startX: Float = 0f,
@@ -161,11 +135,10 @@ data class ShapeEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("userId"), Index("pageId")]
+    indices = [Index("pageId")]
 )
 data class TextItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val pageId: Long,
     val text: String,
     val x: Float = 50f,
@@ -193,11 +166,10 @@ data class TextItemEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("userId"), Index("pageId")]
+    indices = [Index("pageId")]
 )
 data class MediaItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val pageId: Long,
     val localUri: String,
     val x: Float = 50f,
@@ -218,11 +190,10 @@ data class MediaItemEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("userId"), Index("notebookId")]
+    indices = [Index("notebookId")]
 )
 data class AudioRecordingEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val notebookId: Long,
     val fileName: String,
     val filePath: String,
@@ -241,11 +212,10 @@ data class AudioRecordingEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("userId"), Index("pageId")]
+    indices = [Index("pageId")]
 )
 data class PageSnapshotEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val pageId: Long,
     val notebookId: Long,
     val title: String,
@@ -265,11 +235,10 @@ data class PageSnapshotEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("userId"), Index("notebookId")]
+    indices = [Index("notebookId")]
 )
 data class FlashcardEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val userId: String = "",
     val notebookId: Long,
     val frontText: String,
     val backText: String,

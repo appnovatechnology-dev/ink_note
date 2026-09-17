@@ -3,7 +3,6 @@ package com.example.inknote.data.repository
 import android.content.Context
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.room.withTransaction
 import com.example.inknote.data.db.AppDatabase
 import com.example.inknote.data.db.entities.*
 import com.example.inknote.data.model.*
@@ -15,20 +14,12 @@ import kotlinx.coroutines.withContext
 
 class NoteRepository(private val database: AppDatabase) {
 
-    fun getSubjects(userId: String): Flow<List<SubjectEntity>> =
-        database.subjectDao().getAllSubjects(userId)
+    val allSubjects: Flow<List<SubjectEntity>> = database.subjectDao().getAllSubjects()
+    val allNotebooks: Flow<List<NotebookEntity>> = database.notebookDao().getAllNotebooks()
+    val favoriteNotebooks: Flow<List<NotebookEntity>> = database.notebookDao().getFavoriteNotebooks()
 
-    fun getNotebooks(userId: String): Flow<List<NotebookEntity>> =
-        database.notebookDao().getAllNotebooks(userId)
-
-    fun getFavoriteNotebooks(userId: String): Flow<List<NotebookEntity>> =
-        database.notebookDao().getFavoriteNotebooks(userId)
-
-    fun getNotebooksBySubject(userId: String, subjectId: Long): Flow<List<NotebookEntity>> =
-        database.notebookDao().getNotebooksBySubject(userId, subjectId)
-
-    fun getNotebookFlow(userId: String, notebookId: Long): Flow<NotebookEntity?> =
-        database.notebookDao().getNotebookFlowByIdForUser(userId, notebookId)
+    fun getNotebooksBySubject(subjectId: Long): Flow<List<NotebookEntity>> =
+        database.notebookDao().getNotebooksBySubject(subjectId)
 
     fun getNotebookFlow(notebookId: Long): Flow<NotebookEntity?> =
         database.notebookDao().getNotebookFlowById(notebookId)
@@ -36,15 +27,12 @@ class NoteRepository(private val database: AppDatabase) {
     suspend fun getNotebook(notebookId: Long): NotebookEntity? =
         database.notebookDao().getNotebookById(notebookId)
 
-    suspend fun getNotebook(userId: String, notebookId: Long): NotebookEntity? =
-        database.notebookDao().getNotebookByIdForUser(userId, notebookId)
+    fun searchNotebooks(query: String): Flow<List<NotebookEntity>> =
+        database.notebookDao().searchNotebooks(query)
 
-    fun searchNotebooks(userId: String, query: String): Flow<List<NotebookEntity>> =
-        database.notebookDao().searchNotebooks(userId, query)
-
-    suspend fun createSubject(userId: String, name: String, colorHex: String): Long {
+    suspend fun createSubject(name: String, colorHex: String): Long {
         return database.subjectDao().insertSubject(
-            SubjectEntity(userId = userId, name = name, colorHex = colorHex)
+            SubjectEntity(name = name, colorHex = colorHex)
         )
     }
 
@@ -57,7 +45,6 @@ class NoteRepository(private val database: AppDatabase) {
     }
 
     suspend fun createNotebook(
-        userId: String,
         title: String,
         subjectId: Long? = null,
         coverColorHex: String = "#6366F1",
@@ -66,7 +53,6 @@ class NoteRepository(private val database: AppDatabase) {
         val now = System.currentTimeMillis()
         val notebookId = database.notebookDao().insertNotebook(
             NotebookEntity(
-                userId = userId,
                 subjectId = subjectId,
                 title = title,
                 coverColorHex = coverColorHex,
@@ -78,7 +64,6 @@ class NoteRepository(private val database: AppDatabase) {
         // Create initial page
         database.pageDao().insertPage(
             PageEntity(
-                userId = userId,
                 notebookId = notebookId,
                 pageNumber = 1,
                 templateType = templateType
@@ -107,20 +92,11 @@ class NoteRepository(private val database: AppDatabase) {
     suspend fun getPagesList(notebookId: Long): List<PageEntity> =
         database.pageDao().getPagesListForNotebook(notebookId)
 
-    suspend fun addPage(
-        notebookId: Long,
-        templateType: String = "BLANK",
-        customBgPath: String? = null,
-        pdfPageNum: Int? = null,
-        userId: String = ""
-    ): Long {
-        val nb = database.notebookDao().getNotebookById(notebookId)
-        val resolvedUserId = if (userId.isNotEmpty()) userId else (nb?.userId ?: "")
+    suspend fun addPage(notebookId: Long, templateType: String = "BLANK", customBgPath: String? = null, pdfPageNum: Int? = null): Long {
         val pages = database.pageDao().getPagesListForNotebook(notebookId)
         val nextNumber = (pages.maxOfOrNull { it.pageNumber } ?: 0) + 1
         val newPageId = database.pageDao().insertPage(
             PageEntity(
-                userId = resolvedUserId,
                 notebookId = notebookId,
                 pageNumber = nextNumber,
                 templateType = templateType,
@@ -128,6 +104,7 @@ class NoteRepository(private val database: AppDatabase) {
                 pdfPageNumber = pdfPageNum
             )
         )
+        val nb = database.notebookDao().getNotebookById(notebookId)
         if (nb != null) {
             database.notebookDao().updateNotebook(nb.copy(pageCount = pages.size + 1, updatedAt = System.currentTimeMillis()))
         }
@@ -165,17 +142,10 @@ class NoteRepository(private val database: AppDatabase) {
         }
     }
 
-    suspend fun saveStrokesForPage(pageId: Long, strokes: List<VectorStroke>, userId: String = "") = withContext(Dispatchers.IO) {
+    suspend fun saveStrokesForPage(pageId: Long, strokes: List<VectorStroke>) = withContext(Dispatchers.IO) {
         database.strokeDao().clearStrokesForPage(pageId)
-        val resolvedUserId = if (userId.isNotEmpty()) {
-            userId
-        } else {
-            database.pageDao().getPageById(pageId)?.userId ?: ""
-        }
         val entities = strokes.mapIndexed { index, stroke ->
             StrokeEntity(
-                id = if (stroke.id != 0L) stroke.id else 0L,
-                userId = resolvedUserId,
                 pageId = pageId,
                 toolType = stroke.toolType.name,
                 colorArgb = stroke.color.toArgb().toLong() and 0xFFFFFFFFL,
@@ -213,16 +183,10 @@ class NoteRepository(private val database: AppDatabase) {
         }
     }
 
-    suspend fun saveShapesForPage(pageId: Long, shapes: List<GeometricShape>, userId: String = "") = withContext(Dispatchers.IO) {
+    suspend fun saveShapesForPage(pageId: Long, shapes: List<GeometricShape>) = withContext(Dispatchers.IO) {
         database.shapeDao().clearShapesForPage(pageId)
-        val resolvedUserId = if (userId.isNotEmpty()) {
-            userId
-        } else {
-            database.pageDao().getPageById(pageId)?.userId ?: ""
-        }
         val entities = shapes.mapIndexed { index, shape ->
             ShapeEntity(
-                userId = resolvedUserId,
                 pageId = pageId,
                 shapeType = shape.shapeType.name,
                 startX = shape.startX,
@@ -268,17 +232,11 @@ class NoteRepository(private val database: AppDatabase) {
         }
     }
 
-    suspend fun saveTextItemsForPage(pageId: Long, items: List<CanvasTextItem>, userId: String = "") = withContext(Dispatchers.IO) {
+    suspend fun saveTextItemsForPage(pageId: Long, items: List<CanvasTextItem>) = withContext(Dispatchers.IO) {
         database.textItemDao().clearTextForPage(pageId)
-        val resolvedUserId = if (userId.isNotEmpty()) {
-            userId
-        } else {
-            database.pageDao().getPageById(pageId)?.userId ?: ""
-        }
         items.forEach { item ->
             database.textItemDao().insertTextItem(
                 TextItemEntity(
-                    userId = resolvedUserId,
                     pageId = pageId,
                     text = item.text,
                     x = item.x,
@@ -318,17 +276,11 @@ class NoteRepository(private val database: AppDatabase) {
         }
     }
 
-    suspend fun saveMediaItemsForPage(pageId: Long, items: List<CanvasMediaItem>, userId: String = "") = withContext(Dispatchers.IO) {
+    suspend fun saveMediaItemsForPage(pageId: Long, items: List<CanvasMediaItem>) = withContext(Dispatchers.IO) {
         database.mediaItemDao().clearMediaForPage(pageId)
-        val resolvedUserId = if (userId.isNotEmpty()) {
-            userId
-        } else {
-            database.pageDao().getPageById(pageId)?.userId ?: ""
-        }
         items.forEach { item ->
             database.mediaItemDao().insertMediaItem(
                 MediaItemEntity(
-                    userId = resolvedUserId,
                     pageId = pageId,
                     localUri = item.localUri,
                     x = item.x,
@@ -339,117 +291,6 @@ class NoteRepository(private val database: AppDatabase) {
                     audioTimestampMs = item.audioTimestampMs
                 )
             )
-        }
-    }
-
-    suspend fun saveEntirePageContent(
-        pageId: Long,
-        strokes: List<VectorStroke>,
-        shapes: List<GeometricShape>,
-        textItems: List<CanvasTextItem>,
-        mediaItems: List<CanvasMediaItem>,
-        userId: String = ""
-    ) = withContext(Dispatchers.IO) {
-        val page = database.pageDao().getPageById(pageId)
-        val resolvedUserId = if (userId.isNotEmpty()) userId else (page?.userId ?: "")
-
-        val strokeEntities = strokes.mapIndexed { index, stroke ->
-            StrokeEntity(
-                id = if (stroke.id != 0L) stroke.id else 0L,
-                userId = resolvedUserId,
-                pageId = pageId,
-                toolType = stroke.toolType.name,
-                colorArgb = stroke.color.toArgb().toLong() and 0xFFFFFFFFL,
-                strokeWidth = stroke.strokeWidth,
-                alpha = stroke.alpha,
-                pointsJson = stroke.toSerializedPoints(),
-                audioTimestampMs = stroke.audioTimestampMs,
-                orderIndex = index
-            )
-        }
-
-        val shapeEntities = shapes.mapIndexed { index, shape ->
-            ShapeEntity(
-                id = if (shape.id != 0L) shape.id else 0L,
-                userId = resolvedUserId,
-                pageId = pageId,
-                shapeType = shape.shapeType.name,
-                startX = shape.startX,
-                startY = shape.startY,
-                endX = shape.endX,
-                endY = shape.endY,
-                strokeColorArgb = shape.strokeColor.toArgb().toLong() and 0xFFFFFFFFL,
-                fillColorArgb = shape.fillColor.toArgb().toLong() and 0xFFFFFFFFL,
-                strokeWidth = shape.strokeWidth,
-                rotationDegrees = shape.rotationDegrees,
-                isFilled = shape.isFilled,
-                sideCount = shape.sideCount,
-                audioTimestampMs = shape.audioTimestampMs,
-                orderIndex = index
-            )
-        }
-
-        val textEntities = textItems.map { item ->
-            TextItemEntity(
-                id = if (item.id != 0L) item.id else 0L,
-                userId = resolvedUserId,
-                pageId = pageId,
-                text = item.text,
-                x = item.x,
-                y = item.y,
-                width = item.width,
-                height = item.height,
-                fontSize = item.fontSize,
-                fontColorArgb = item.fontColor.toArgb().toLong() and 0xFFFFFFFFL,
-                isBold = item.isBold,
-                isItalic = item.isItalic,
-                backgroundColorArgb = item.backgroundColor.toArgb().toLong() and 0xFFFFFFFFL,
-                audioTimestampMs = item.audioTimestampMs,
-                isMathFormula = item.isMathFormula,
-                linkNotebookId = item.linkNotebookId,
-                linkNotebookTitle = item.linkNotebookTitle
-            )
-        }
-
-        val mediaEntities = mediaItems.map { media ->
-            MediaItemEntity(
-                id = if (media.id != 0L) media.id else 0L,
-                userId = resolvedUserId,
-                pageId = pageId,
-                localUri = media.localUri,
-                x = media.x,
-                y = media.y,
-                width = media.width,
-                height = media.height,
-                rotationDegrees = media.rotationDegrees,
-                audioTimestampMs = media.audioTimestampMs
-            )
-        }
-
-        database.withTransaction {
-            database.strokeDao().clearStrokesForPage(pageId)
-            if (strokeEntities.isNotEmpty()) {
-                database.strokeDao().insertStrokes(strokeEntities)
-            }
-            database.shapeDao().clearShapesForPage(pageId)
-            if (shapeEntities.isNotEmpty()) {
-                database.shapeDao().insertShapes(shapeEntities)
-            }
-            database.textItemDao().clearTextForPage(pageId)
-            if (textEntities.isNotEmpty()) {
-                database.textItemDao().insertTextItems(textEntities)
-            }
-            database.mediaItemDao().clearMediaForPage(pageId)
-            if (mediaEntities.isNotEmpty()) {
-                database.mediaItemDao().insertMediaItems(mediaEntities)
-            }
-            if (page != null) {
-                database.pageDao().updatePage(page.copy(updatedAt = System.currentTimeMillis()))
-                val nb = database.notebookDao().getNotebookById(page.notebookId)
-                if (nb != null) {
-                    database.notebookDao().updateNotebook(nb.copy(updatedAt = System.currentTimeMillis()))
-                }
-            }
         }
     }
 
@@ -549,8 +390,8 @@ class NoteRepository(private val database: AppDatabase) {
         }
     }
 
-    suspend fun searchAllText(userId: String, query: String): List<TextItemEntity> =
-        database.textItemDao().searchAllText(userId, query)
+    suspend fun searchAllText(query: String): List<TextItemEntity> =
+        database.textItemDao().searchAllText(query)
 
     // Snapshots / Version History
     fun getSnapshotsForPage(pageId: Long): Flow<List<PageSnapshotEntity>> =
@@ -562,17 +403,10 @@ class NoteRepository(private val database: AppDatabase) {
         title: String,
         strokesJson: String,
         shapesJson: String,
-        textJson: String,
-        userId: String = ""
+        textJson: String
     ): Long = withContext(Dispatchers.IO) {
-        val resolvedUserId = if (userId.isNotEmpty()) {
-            userId
-        } else {
-            database.pageDao().getPageById(pageId)?.userId ?: ""
-        }
         database.pageSnapshotDao().insertSnapshot(
             PageSnapshotEntity(
-                userId = resolvedUserId,
                 pageId = pageId,
                 notebookId = notebookId,
                 title = title,
@@ -623,83 +457,6 @@ class NoteRepository(private val database: AppDatabase) {
     suspend fun updatePageSize(pageId: Long, pageSize: String, width: Float, height: Float) = withContext(Dispatchers.IO) {
         val p = database.pageDao().getPageById(pageId) ?: return@withContext
         database.pageDao().updatePage(p.copy(pageSize = pageSize, width = width, height = height, updatedAt = System.currentTimeMillis()))
-    }
-
-    suspend fun initializeDefaultDataForUser(userId: String) = withContext(Dispatchers.IO) {
-        if (userId.isBlank()) return@withContext
-        val existing = database.notebookDao().getAllNotebooksList(userId)
-        if (existing.isNotEmpty()) return@withContext
-
-        val sub1Id = database.subjectDao().insertSubject(
-            SubjectEntity(userId = userId, name = "Personal & Ideas", colorHex = "#6366F1", sortOrder = 0)
-        )
-        database.subjectDao().insertSubject(
-            SubjectEntity(userId = userId, name = "Work & Projects", colorHex = "#EC4899", sortOrder = 1)
-        )
-        database.subjectDao().insertSubject(
-            SubjectEntity(userId = userId, name = "Math & Sketches", colorHex = "#10B981", sortOrder = 2)
-        )
-
-        val nbId = database.notebookDao().insertNotebook(
-            NotebookEntity(
-                userId = userId,
-                subjectId = sub1Id,
-                title = "Welcome to InkNote ✍️",
-                coverColorHex = "#6366F1",
-                isFavorite = true,
-                pageCount = 2
-            )
-        )
-
-        val page1Id = database.pageDao().insertPage(
-            PageEntity(
-                userId = userId,
-                notebookId = nbId,
-                pageNumber = 1,
-                templateType = "BLANK"
-            )
-        )
-
-        database.pageDao().insertPage(
-            PageEntity(
-                userId = userId,
-                notebookId = nbId,
-                pageNumber = 2,
-                templateType = "BLANK"
-            )
-        )
-
-        database.textItemDao().insertTextItem(
-            TextItemEntity(
-                userId = userId,
-                pageId = page1Id,
-                text = "Welcome to InkNote!\n\n• Smooth stylus & finger vector ink\n• Geometric tools: Ruler, Protractor, Compass & Shape snap\n• Synced Audio Recording & Scrubbing\n• PDF & Image Annotations\n• 100% Cloud Synced & Private to your account",
-                x = 80f,
-                y = 120f,
-                width = 650f,
-                height = 220f,
-                fontSize = 18f,
-                fontColorArgb = 0xFF1E293BL,
-                isBold = false,
-                backgroundColorArgb = 0x156366F1L
-            )
-        )
-
-        database.shapeDao().insertShape(
-            ShapeEntity(
-                userId = userId,
-                pageId = page1Id,
-                shapeType = "RECTANGLE",
-                startX = 60f,
-                startY = 100f,
-                endX = 760f,
-                endY = 360f,
-                strokeColorArgb = 0xFF6366F1L,
-                fillColorArgb = 0x086366F1L,
-                strokeWidth = 3f,
-                isFilled = true
-            )
-        )
     }
 
     companion object {

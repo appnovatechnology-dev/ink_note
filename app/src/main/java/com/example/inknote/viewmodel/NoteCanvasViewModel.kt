@@ -13,24 +13,26 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.inknote.audio.AudioPlayerManager
 import com.example.inknote.audio.AudioRecorderManager
+import com.example.inknote.audio.OfflineTtsManager
 import com.example.inknote.audio.TranscriptionManager
 import com.example.inknote.audio.TranscriptionResult
 import com.example.inknote.data.ai.*
-import com.example.inknote.data.auth.AuthRepository
 import com.example.inknote.data.db.entities.AudioRecordingEntity
 import com.example.inknote.data.db.entities.FlashcardEntity
 import com.example.inknote.data.db.entities.NotebookEntity
 import com.example.inknote.data.db.entities.PageEntity
 import com.example.inknote.data.db.entities.PageSnapshotEntity
 import com.example.inknote.data.model.*
+import com.example.inknote.data.preferences.SettingsManager
 import com.example.inknote.data.repository.NoteRepository
 import com.example.inknote.geometry.GeometryEngine
 import com.example.inknote.pdf.PdfManager
+import com.example.inknote.ui.canvas.components.StylusInputState
+import com.example.inknote.util.DownloadUtils
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.io.File
 import java.io.FileOutputStream
-import android.util.Log
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -49,12 +51,6 @@ data class PageDataState(
     val mediaItems: List<CanvasMediaItem> = emptyList()
 )
 
-enum class SaveStatus {
-    SAVED,
-    SAVING,
-    ERROR
-}
-
 data class NoteCanvasUiState(
     val notebook: NotebookEntity? = null,
     val pages: List<PageEntity> = emptyList(),
@@ -66,11 +62,6 @@ data class NoteCanvasUiState(
     val mediaItems: List<CanvasMediaItem> = emptyList(),
     val recordings: List<AudioRecordingEntity> = emptyList(),
 
-    // Continuous Auto-Save Status
-    val saveStatus: SaveStatus = SaveStatus.SAVED,
-    val lastSavedTimeMillis: Long = System.currentTimeMillis(),
-    val saveErrorMessage: String? = null,
-
     // Tool Settings
     val activeTool: ToolType = ToolType.PEN,
     val penColor: Color = Color(0xFF0F172A),
@@ -81,7 +72,9 @@ data class NoteCanvasUiState(
     val eraserWidth: Float = 24f,
     val isMagicInkEnabled: Boolean = false,
     val isGridSnapEnabled: Boolean = false,
-    val isPalmRejectionEnabled: Boolean = true,
+    val laserColor: Color = Color(0xFFEF4444),
+    val isLaserTailEnabled: Boolean = true,
+    val palmRejectionMode: PalmRejectionMode = PalmRejectionMode.STYLUS_ONLY,
     val isContinuousScroll: Boolean = true,
 
     // Geometric Tools
@@ -102,6 +95,7 @@ data class NoteCanvasUiState(
     val lassoSelectedStrokes: List<VectorStroke> = emptyList(),
     val lassoSelectedShapes: List<GeometricShape> = emptyList(),
     val lassoSelectedTextItems: List<CanvasTextItem> = emptyList(),
+    val lassoSelectedMediaItems: List<CanvasMediaItem> = emptyList(),
     val lassoSelectionBounds: Rect? = null,
 
     // Audio State
@@ -112,6 +106,9 @@ data class NoteCanvasUiState(
     val playbackTotalMs: Long = 0L,
     val playbackSpeed: Float = 1.0f,
     val activeRecordingId: Long? = null,
+
+    // Offline Text to Speech
+    val isSpeakingTts: Boolean = false,
 
     // Zoom & Viewport
     val zoomScale: Float = 1.0f,
@@ -126,10 +123,12 @@ data class NoteCanvasUiState(
     val showExportDialog: Boolean = false,
     val showAudioListDialog: Boolean = false,
     val showTranscriptionDialog: Boolean = false,
+    val showSettingsDialog: Boolean = false,
     val isTranscribing: Boolean = false,
     val transcriptionResult: TranscriptionResult? = null,
     val isExporting: Boolean = false,
     val showShapePropertyDialog: Boolean = false,
+    val saveNotificationMessage: String? = null,
 
     // Advanced Smart Features
     val flashcards: List<FlashcardEntity> = emptyList(),
@@ -155,12 +154,13 @@ enum class EraserMode {
 
 class NoteCanvasViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = NoteRepository.getInstance(application)
-    private val authRepository = AuthRepository.getInstance(application)
-    private val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val settingsManager = SettingsManager(application)
     val recorderManager = AudioRecorderManager(application)
     val playerManager = AudioPlayerManager()
     val transcriptionManager = TranscriptionManager(application)
     val aiSmartEngine = AiSmartToolsEngine(application)
+    val ttsManager = OfflineTtsManager(application)
+    val stylusInputState = StylusInputState()
 
     private val _uiState = MutableStateFlow(NoteCanvasUiState())
     val uiState: StateFlow<NoteCanvasUiState> = _uiState.asStateFlow()
@@ -172,6 +172,24 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
     private var autoSaveJob: Job? = null
 
     init {
+        stylusInputState.isStylusConnectedOrActive(application)
+        // Load persisted settings
+        _uiState.update {
+            it.copy(
+                palmRejectionMode = settingsManager.palmRejectionMode,
+                penColor = settingsManager.penColor,
+                penWidth = settingsManager.penWidth,
+                highlighterColor = settingsManager.highlighterColor,
+                highlighterWidth = settingsManager.highlighterWidth,
+                eraserMode = settingsManager.eraserMode,
+                eraserWidth = settingsManager.eraserWidth,
+                isGridSnapEnabled = settingsManager.isGridSnapEnabled,
+                isMagicInkEnabled = settingsManager.isMagicInkEnabled,
+                laserColor = settingsManager.laserColor,
+                isLaserTailEnabled = settingsManager.isLaserTailEnabled
+            )
+        }
+
         // Observe recorder state
         viewModelScope.launch {
             recorderManager.recordingState.collect { isRec ->
@@ -203,6 +221,11 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             playerManager.playbackSpeed.collect { sp ->
                 _uiState.update { it.copy(playbackSpeed = sp) }
+            }
+        }
+        viewModelScope.launch {
+            ttsManager.isSpeaking.collect { speaking ->
+                _uiState.update { it.copy(isSpeakingTts = speaking) }
             }
         }
     }
@@ -406,35 +429,56 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun setPenColor(color: Color) {
+        settingsManager.penColor = color
         _uiState.update { it.copy(penColor = color) }
     }
 
     fun setPenWidth(width: Float) {
+        settingsManager.penWidth = width
         _uiState.update { it.copy(penWidth = width) }
     }
 
     fun setHighlighterColor(color: Color) {
+        settingsManager.highlighterColor = color
         _uiState.update { it.copy(highlighterColor = color) }
     }
 
     fun setHighlighterWidth(width: Float) {
+        settingsManager.highlighterWidth = width
         _uiState.update { it.copy(highlighterWidth = width) }
     }
 
     fun setEraserMode(mode: EraserMode) {
+        settingsManager.eraserMode = mode
         _uiState.update { it.copy(eraserMode = mode) }
     }
 
+    fun setEraserWidth(width: Float) {
+        settingsManager.eraserWidth = width
+        _uiState.update { it.copy(eraserWidth = width) }
+    }
+
     fun toggleMagicInk() {
-        _uiState.update { it.copy(isMagicInkEnabled = !it.isMagicInkEnabled) }
+        val newVal = !_uiState.value.isMagicInkEnabled
+        settingsManager.isMagicInkEnabled = newVal
+        _uiState.update { it.copy(isMagicInkEnabled = newVal) }
     }
 
     fun toggleGridSnap() {
-        _uiState.update { it.copy(isGridSnapEnabled = !it.isGridSnapEnabled) }
+        val newVal = !_uiState.value.isGridSnapEnabled
+        settingsManager.isGridSnapEnabled = newVal
+        _uiState.update { it.copy(isGridSnapEnabled = newVal) }
     }
 
-    fun togglePalmRejection() {
-        _uiState.update { it.copy(isPalmRejectionEnabled = !it.isPalmRejectionEnabled) }
+    fun setLaserColor(color: Color) {
+        settingsManager.laserColor = color
+        _uiState.update { it.copy(laserColor = color) }
+    }
+
+    fun toggleLaserTail() {
+        val newVal = !_uiState.value.isLaserTailEnabled
+        settingsManager.isLaserTailEnabled = newVal
+        _uiState.update { it.copy(isLaserTailEnabled = newVal) }
     }
 
     // Ruler / Protractor / Compass
@@ -564,234 +608,204 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     // Lasso Selection
-    fun handleLassoSelection(lassoPoints: List<Offset>) {
+    fun handleLassoSelection(lassoPoints: List<Offset>, targetPageId: Long? = null) {
         if (lassoPoints.size < 3) {
-            clearLassoSelection()
+            _uiState.update {
+                it.copy(
+                    hasSelection = false,
+                    lassoSelectedStrokes = emptyList(),
+                    lassoSelectedShapes = emptyList(),
+                    lassoSelectedTextItems = emptyList(),
+                    lassoSelectedMediaItems = emptyList(),
+                    lassoSelectionBounds = null
+                )
+            }
             return
         }
 
-        var polyMinX = Float.MAX_VALUE
-        var polyMaxX = Float.MIN_VALUE
-        var polyMinY = Float.MAX_VALUE
-        var polyMaxY = Float.MIN_VALUE
+        var minX = Float.MAX_VALUE
+        var maxX = Float.MIN_VALUE
+        var minY = Float.MAX_VALUE
+        var maxY = Float.MIN_VALUE
 
         lassoPoints.forEach { pt ->
-            polyMinX = min(polyMinX, pt.x)
-            polyMaxX = max(polyMaxX, pt.x)
-            polyMinY = min(polyMinY, pt.y)
-            polyMaxY = max(polyMaxY, pt.y)
+            minX = min(minX, pt.x)
+            maxX = max(maxX, pt.x)
+            minY = min(minY, pt.y)
+            maxY = max(maxY, pt.y)
         }
 
-        val polyBounds = Rect(polyMinX, polyMinY, polyMaxX, polyMaxY)
+        val bounds = Rect(minX, minY, maxX, maxY)
+        val pageId = targetPageId ?: currentPage?.id
+        val pageData = if (pageId != null) _uiState.value.pagesData[pageId] else null
+        val strokes = pageData?.strokes ?: _uiState.value.strokes
+        val shapes = pageData?.shapes ?: _uiState.value.shapes
+        val texts = pageData?.textItems ?: _uiState.value.textItems
+        val medias = pageData?.mediaItems ?: _uiState.value.mediaItems
 
-        val selectedStrokes = _uiState.value.strokes.filter { stroke ->
-            GeometryEngine.isStrokeSelectedByLasso(stroke, lassoPoints, polyBounds)
-        }
-        val selectedShapes = _uiState.value.shapes.filter { shape ->
-            GeometryEngine.isShapeSelectedByLasso(shape, lassoPoints, polyBounds)
-        }
-        val selectedTextItems = _uiState.value.textItems.filter { item ->
-            GeometryEngine.isTextSelectedByLasso(item, lassoPoints, polyBounds)
-        }
-
-        val hasAny = selectedStrokes.isNotEmpty() || selectedShapes.isNotEmpty() || selectedTextItems.isNotEmpty()
-
-        if (!hasAny) {
-            clearLassoSelection()
-            return
+        val selectedStrokes = strokes.filter { stroke ->
+            stroke.points.any { p -> bounds.contains(Offset(p.x, p.y)) }
         }
 
-        var bMinX = Float.MAX_VALUE
-        var bMaxX = Float.MIN_VALUE
-        var bMinY = Float.MAX_VALUE
-        var bMaxY = Float.MIN_VALUE
+        val selectedShapes = shapes.filter { shape ->
+            val sMinX = min(shape.startX, shape.endX)
+            val sMaxX = max(shape.startX, shape.endX)
+            val sMinY = min(shape.startY, shape.endY)
+            val sMaxY = max(shape.startY, shape.endY)
+            bounds.overlaps(Rect(sMinX, sMinY, sMaxX, sMaxY))
+        }
 
-        selectedStrokes.forEach { s ->
-            s.points.forEach { p ->
-                bMinX = min(bMinX, p.x)
-                bMaxX = max(bMaxX, p.x)
-                bMinY = min(bMinY, p.y)
-                bMaxY = max(bMaxY, p.y)
+        val selectedTexts = texts.filter { text ->
+            bounds.overlaps(Rect(text.x, text.y, text.x + text.width, text.y + text.height))
+        }
+
+        val selectedMedias = medias.filter { media ->
+            bounds.overlaps(Rect(media.x, media.y, media.x + media.width, media.y + media.height))
+        }
+
+        val hasAny = selectedStrokes.isNotEmpty() || selectedShapes.isNotEmpty() || selectedTexts.isNotEmpty() || selectedMedias.isNotEmpty()
+
+        // Calculate tight bounding box of all selected content
+        val contentBounds = if (hasAny) {
+            var bMinX = bounds.left
+            var bMaxX = bounds.right
+            var bMinY = bounds.top
+            var bMaxY = bounds.bottom
+
+            selectedStrokes.forEach { s ->
+                s.points.forEach { p ->
+                    bMinX = min(bMinX, p.x)
+                    bMaxX = max(bMaxX, p.x)
+                    bMinY = min(bMinY, p.y)
+                    bMaxY = max(bMaxY, p.y)
+                }
             }
-        }
-        selectedShapes.forEach { s ->
-            bMinX = min(bMinX, min(s.startX, s.endX))
-            bMaxX = max(bMaxX, max(s.startX, s.endX))
-            bMinY = min(bMinY, min(s.startY, s.endY))
-            bMaxY = max(bMaxY, max(s.startY, s.endY))
-        }
-        selectedTextItems.forEach { t ->
-            bMinX = min(bMinX, t.x)
-            bMaxX = max(bMaxX, t.x + t.width)
-            bMinY = min(bMinY, t.y)
-            bMaxY = max(bMaxY, t.y + 60f)
-        }
-
-        val padding = 12f
-        val finalBounds = Rect(
-            (bMinX - padding).coerceAtLeast(0f),
-            (bMinY - padding).coerceAtLeast(0f),
-            (bMaxX + padding).coerceAtMost(1000f),
-            (bMaxY + padding).coerceAtMost(1414f)
-        )
+            selectedShapes.forEach { sh ->
+                bMinX = min(bMinX, min(sh.startX, sh.endX))
+                bMaxX = max(bMaxX, max(sh.startX, sh.endX))
+                bMinY = min(bMinY, min(sh.startY, sh.endY))
+                bMaxY = max(bMaxY, max(sh.startY, sh.endY))
+            }
+            selectedTexts.forEach { t ->
+                bMinX = min(bMinX, t.x)
+                bMaxX = max(bMaxX, t.x + t.width)
+                bMinY = min(bMinY, t.y)
+                bMaxY = max(bMaxY, t.y + t.height)
+            }
+            selectedMedias.forEach { m ->
+                bMinX = min(bMinX, m.x)
+                bMaxX = max(bMaxX, m.x + m.width)
+                bMinY = min(bMinY, m.y)
+                bMaxY = max(bMaxY, m.y + m.height)
+            }
+            Rect(bMinX, bMinY, bMaxX, bMaxY)
+        } else null
 
         _uiState.update {
             it.copy(
-                hasSelection = true,
+                hasSelection = hasAny,
                 lassoSelectedStrokes = selectedStrokes,
                 lassoSelectedShapes = selectedShapes,
-                lassoSelectedTextItems = selectedTextItems,
-                lassoSelectionBounds = finalBounds
+                lassoSelectedTextItems = selectedTexts,
+                lassoSelectedMediaItems = selectedMedias,
+                lassoSelectionBounds = contentBounds
             )
         }
     }
 
-    fun startMovingLassoSelection() {
-        // Drag started; lightweight visual preview is handled in UI layer
-    }
-
-    /**
-     * Commits the final moved position for the selected lasso items.
-     * Genuinely shifts each selected object's coordinates without deleting or recreating strokes.
-     */
-    fun commitLassoMove(deltaX: Float, deltaY: Float) {
+    fun moveLassoSelection(deltaX: Float, deltaY: Float, targetPageId: Long? = null) {
         if (deltaX == 0f && deltaY == 0f) return
+        val pageId = targetPageId ?: currentPage?.id ?: return
+        val currentData = _uiState.value.pagesData[pageId] ?: return
 
         val selectedStrokes = _uiState.value.lassoSelectedStrokes
         val selectedShapes = _uiState.value.lassoSelectedShapes
-        val selectedTextItems = _uiState.value.lassoSelectedTextItems
-        val bounds = _uiState.value.lassoSelectionBounds ?: return
-        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTextItems.isEmpty()) return
+        val selectedTexts = _uiState.value.lassoSelectedTextItems
+        val selectedMedias = _uiState.value.lassoSelectedMediaItems
+
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTexts.isEmpty() && selectedMedias.isEmpty()) return
 
         pushUndoSnapshot()
 
-        val selectedStrokeIds = selectedStrokes.map { it.id }.toSet()
-        val selectedShapeIds = selectedShapes.map { it.id }.toSet()
-        val selectedTextIds = selectedTextItems.map { it.id }.toSet()
-
-        val movedStrokesList = mutableListOf<VectorStroke>()
-        val newStrokes = _uiState.value.strokes.map { stroke ->
-            if (selectedStrokeIds.contains(stroke.id)) {
-                val moved = stroke.copy(
-                    points = stroke.points.map { p -> p.copy(x = p.x + deltaX, y = p.y + deltaY) }
-                )
-                movedStrokesList.add(moved)
-                moved
+        val selectedStrokeIds = selectedStrokes.map { it.id }.filter { it != 0L }.toSet()
+        val updatedStrokes = currentData.strokes.map { s ->
+            val isSelected = (s.id != 0L && selectedStrokeIds.contains(s.id)) || selectedStrokes.contains(s)
+            if (isSelected) {
+                s.copy(points = s.points.map { it.copy(x = it.x + deltaX, y = it.y + deltaY) })
             } else {
-                stroke
+                s
             }
         }
 
-        val movedShapesList = mutableListOf<GeometricShape>()
-        val newShapes = _uiState.value.shapes.map { shape ->
-            if (selectedShapeIds.contains(shape.id)) {
-                val moved = shape.copy(
+        val selectedShapeIds = selectedShapes.map { it.id }.filter { it != 0L }.toSet()
+        val updatedShapes = currentData.shapes.map { shape ->
+            val isSelected = (shape.id != 0L && selectedShapeIds.contains(shape.id)) || selectedShapes.contains(shape)
+            if (isSelected) {
+                shape.copy(
                     startX = shape.startX + deltaX,
                     startY = shape.startY + deltaY,
                     endX = shape.endX + deltaX,
                     endY = shape.endY + deltaY
                 )
-                movedShapesList.add(moved)
-                moved
             } else {
                 shape
             }
         }
 
-        val movedTextsList = mutableListOf<CanvasTextItem>()
-        val newTexts = _uiState.value.textItems.map { text ->
-            if (selectedTextIds.contains(text.id)) {
-                val moved = text.copy(
-                    x = text.x + deltaX,
-                    y = text.y + deltaY
-                )
-                movedTextsList.add(moved)
-                moved
+        val selectedTextIds = selectedTexts.map { it.id }.filter { it != 0L }.toSet()
+        val updatedTexts = currentData.textItems.map { text ->
+            val isSelected = (text.id != 0L && selectedTextIds.contains(text.id)) || selectedTexts.any { it.id == text.id }
+            if (isSelected) {
+                text.copy(x = text.x + deltaX, y = text.y + deltaY)
             } else {
                 text
             }
         }
 
-        val newBounds = Rect(
-            bounds.left + deltaX,
-            bounds.top + deltaY,
-            bounds.right + deltaX,
-            bounds.bottom + deltaY
+        val selectedMediaIds = selectedMedias.map { it.id }.filter { it != 0L }.toSet()
+        val updatedMedias = currentData.mediaItems.map { media ->
+            val isSelected = (media.id != 0L && selectedMediaIds.contains(media.id)) || selectedMedias.any { it.id == media.id }
+            if (isSelected) {
+                media.copy(x = media.x + deltaX, y = media.y + deltaY)
+            } else {
+                media
+            }
+        }
+
+        val newBounds = _uiState.value.lassoSelectionBounds?.translate(Offset(deltaX, deltaY))
+
+        updatePageData(
+            pageId = pageId,
+            strokes = updatedStrokes,
+            shapes = updatedShapes,
+            textItems = updatedTexts,
+            mediaItems = updatedMedias
         )
 
-        updateActivePageData(strokes = newStrokes, shapes = newShapes, textItems = newTexts)
+        val newSelectedStrokes = updatedStrokes.filter { s ->
+            (s.id != 0L && selectedStrokeIds.contains(s.id)) || selectedStrokes.any { it.id == s.id }
+        }
+        val newSelectedShapes = updatedShapes.filter { sh ->
+            (sh.id != 0L && selectedShapeIds.contains(sh.id)) || selectedShapes.any { it.id == sh.id }
+        }
+        val newSelectedTexts = updatedTexts.filter { t ->
+            (t.id != 0L && selectedTextIds.contains(t.id)) || selectedTexts.any { it.id == t.id }
+        }
+        val newSelectedMedias = updatedMedias.filter { m ->
+            (m.id != 0L && selectedMediaIds.contains(m.id)) || selectedMedias.any { it.id == m.id }
+        }
+
         _uiState.update {
             it.copy(
-                hasSelection = true,
-                lassoSelectedStrokes = movedStrokesList,
-                lassoSelectedShapes = movedShapesList,
-                lassoSelectedTextItems = movedTextsList,
-                lassoSelectionBounds = newBounds
+                lassoSelectionBounds = newBounds,
+                lassoSelectedStrokes = newSelectedStrokes,
+                lassoSelectedShapes = newSelectedShapes,
+                lassoSelectedTextItems = newSelectedTexts,
+                lassoSelectedMediaItems = newSelectedMedias
             )
         }
-        scheduleAutoSave()
-    }
 
-    fun moveLassoSelection(deltaX: Float, deltaY: Float) {
-        commitLassoMove(deltaX, deltaY)
-    }
-
-    fun finishMovingLassoSelection() {
-        scheduleAutoSave()
-    }
-
-    fun clearLassoSelection() {
-        _uiState.update {
-            it.copy(
-                hasSelection = false,
-                lassoSelectedStrokes = emptyList(),
-                lassoSelectedShapes = emptyList(),
-                lassoSelectedTextItems = emptyList(),
-                lassoSelectionBounds = null
-            )
-        }
-    }
-
-    fun convertLassoToText() {
-        val selectedStrokes = _uiState.value.lassoSelectedStrokes
-        val bounds = _uiState.value.lassoSelectionBounds ?: return
-        if (selectedStrokes.isEmpty()) return
-
-        val selectedStrokeIds = selectedStrokes.map { it.id }.toSet()
-
-        viewModelScope.launch {
-            _uiState.update { it.copy(isAiProcessing = true) }
-            val result = aiSmartEngine.convertHandwritingToText(selectedStrokes)
-
-            pushUndoSnapshot()
-            // Delete converted strokes by ID
-            val remainingStrokes = _uiState.value.strokes.filterNot { selectedStrokeIds.contains(it.id) }
-
-            // Insert converted text item
-            val newItem = CanvasTextItem(
-                id = IdGenerator.nextId(),
-                pageId = currentPage?.id ?: 0,
-                text = result.text,
-                x = bounds.left,
-                y = bounds.top,
-                width = (bounds.width).coerceAtLeast(140f),
-                fontColor = _uiState.value.penColor,
-                isEditing = false
-            )
-
-            updateActivePageData(strokes = remainingStrokes, textItems = _uiState.value.textItems + newItem)
-            _uiState.update {
-                it.copy(
-                    isAiProcessing = false,
-                    hasSelection = false,
-                    lassoSelectedStrokes = emptyList(),
-                    lassoSelectedShapes = emptyList(),
-                    lassoSelectedTextItems = emptyList(),
-                    lassoSelectionBounds = null
-                )
-            }
-            scheduleAutoSave()
-        }
+        scheduleAutoSaveForPage(pageId)
     }
 
     fun convertLassoToMath() {
@@ -799,17 +813,14 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         val bounds = _uiState.value.lassoSelectionBounds ?: return
         if (selectedStrokes.isEmpty()) return
 
-        val selectedStrokeIds = selectedStrokes.map { it.id }.toSet()
-
         viewModelScope.launch {
             _uiState.update { it.copy(isAiProcessing = true) }
             val mathResult = aiSmartEngine.convertMathEquation(selectedStrokes)
 
             pushUndoSnapshot()
-            val remainingStrokes = _uiState.value.strokes.filterNot { selectedStrokeIds.contains(it.id) }
+            val remainingStrokes = _uiState.value.strokes.filterNot { selectedStrokes.contains(it) }
 
             val newItem = CanvasTextItem(
-                id = IdGenerator.nextId(),
                 pageId = currentPage?.id ?: 0,
                 text = "∑ ${mathResult.formulaText}",
                 x = bounds.left,
@@ -830,6 +841,7 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
                     lassoSelectedStrokes = emptyList(),
                     lassoSelectedShapes = emptyList(),
                     lassoSelectedTextItems = emptyList(),
+                    lassoSelectedMediaItems = emptyList(),
                     lassoSelectionBounds = null
                 )
             }
@@ -837,102 +849,134 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun duplicateLassoSelection() {
+    fun duplicateLassoSelection(targetPageId: Long? = null) {
+        val pageId = targetPageId ?: currentPage?.id ?: return
+        val currentData = _uiState.value.pagesData[pageId] ?: return
+
         val selectedStrokes = _uiState.value.lassoSelectedStrokes
         val selectedShapes = _uiState.value.lassoSelectedShapes
-        val selectedTextItems = _uiState.value.lassoSelectedTextItems
-        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTextItems.isEmpty()) return
+        val selectedTexts = _uiState.value.lassoSelectedTextItems
+        val selectedMedias = _uiState.value.lassoSelectedMediaItems
+
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTexts.isEmpty() && selectedMedias.isEmpty()) return
 
         pushUndoSnapshot()
+        val offset = 35f
+
         val duplicatedStrokes = selectedStrokes.map { s ->
             s.copy(
-                id = IdGenerator.nextId(),
-                points = s.points.map { p -> p.copy(x = p.x + 30f, y = p.y + 30f) }
+                id = 0,
+                points = s.points.map { p -> p.copy(x = p.x + offset, y = p.y + offset) }
             )
         }
-        val duplicatedShapes = selectedShapes.map { s ->
-            s.copy(
-                id = IdGenerator.nextId(),
-                startX = s.startX + 30f,
-                startY = s.startY + 30f,
-                endX = s.endX + 30f,
-                endY = s.endY + 30f
+        val duplicatedShapes = selectedShapes.map { sh ->
+            sh.copy(
+                id = 0,
+                startX = sh.startX + offset,
+                startY = sh.startY + offset,
+                endX = sh.endX + offset,
+                endY = sh.endY + offset
             )
         }
-        val duplicatedTexts = selectedTextItems.map { t ->
+        val duplicatedTexts = selectedTexts.map { t ->
             t.copy(
-                id = IdGenerator.nextId(),
-                x = t.x + 30f,
-                y = t.y + 30f
+                id = 0,
+                x = t.x + offset,
+                y = t.y + offset
+            )
+        }
+        val duplicatedMedias = selectedMedias.map { m ->
+            m.copy(
+                id = 0,
+                x = m.x + offset,
+                y = m.y + offset
             )
         }
 
-        val newStrokes = _uiState.value.strokes + duplicatedStrokes
-        val newShapes = _uiState.value.shapes + duplicatedShapes
-        val newTexts = _uiState.value.textItems + duplicatedTexts
+        updatePageData(
+            pageId = pageId,
+            strokes = currentData.strokes + duplicatedStrokes,
+            shapes = currentData.shapes + duplicatedShapes,
+            textItems = currentData.textItems + duplicatedTexts,
+            mediaItems = currentData.mediaItems + duplicatedMedias
+        )
 
-        val oldBounds = _uiState.value.lassoSelectionBounds
-        val newBounds = oldBounds?.let {
-            Rect(it.left + 30f, it.top + 30f, it.right + 30f, it.bottom + 30f)
-        }
-
-        updateActivePageData(strokes = newStrokes, shapes = newShapes, textItems = newTexts)
-        _uiState.update {
-            it.copy(
-                lassoSelectedStrokes = duplicatedStrokes,
-                lassoSelectedShapes = duplicatedShapes,
-                lassoSelectedTextItems = duplicatedTexts,
-                lassoSelectionBounds = newBounds
-            )
-        }
-        scheduleAutoSave()
-    }
-
-    fun deleteLassoSelection() {
-        val selectedStrokes = _uiState.value.lassoSelectedStrokes
-        val selectedShapes = _uiState.value.lassoSelectedShapes
-        val selectedTextItems = _uiState.value.lassoSelectedTextItems
-        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTextItems.isEmpty()) return
-
-        pushUndoSnapshot()
-        val selectedStrokeIds = selectedStrokes.map { it.id }.toSet()
-        val selectedShapeIds = selectedShapes.map { it.id }.toSet()
-        val selectedTextIds = selectedTextItems.map { it.id }.toSet()
-
-        val remainingStrokes = _uiState.value.strokes.filterNot { selectedStrokeIds.contains(it.id) }
-        val remainingShapes = _uiState.value.shapes.filterNot { selectedShapeIds.contains(it.id) }
-        val remainingTexts = _uiState.value.textItems.filterNot { selectedTextIds.contains(it.id) }
-
-        updateActivePageData(strokes = remainingStrokes, shapes = remainingShapes, textItems = remainingTexts)
         _uiState.update {
             it.copy(
                 hasSelection = false,
                 lassoSelectedStrokes = emptyList(),
                 lassoSelectedShapes = emptyList(),
                 lassoSelectedTextItems = emptyList(),
+                lassoSelectedMediaItems = emptyList(),
                 lassoSelectionBounds = null
             )
         }
-        scheduleAutoSave()
+        scheduleAutoSaveForPage(pageId)
     }
 
-    fun changeLassoColor(color: Color) {
+    fun deleteLassoSelection(targetPageId: Long? = null) {
+        val pageId = targetPageId ?: currentPage?.id ?: return
+        val currentData = _uiState.value.pagesData[pageId] ?: return
+
         val selectedStrokes = _uiState.value.lassoSelectedStrokes
         val selectedShapes = _uiState.value.lassoSelectedShapes
-        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty()) return
+        val selectedTexts = _uiState.value.lassoSelectedTextItems
+        val selectedMedias = _uiState.value.lassoSelectedMediaItems
+
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTexts.isEmpty() && selectedMedias.isEmpty()) return
 
         pushUndoSnapshot()
-        val selectedStrokeIds = selectedStrokes.map { it.id }.toSet()
-        val selectedShapeIds = selectedShapes.map { it.id }.toSet()
 
-        val updatedStrokes = _uiState.value.strokes.map { s ->
-            if (selectedStrokeIds.contains(s.id)) s.copy(color = color) else s
+        val selectedStrokeIds = selectedStrokes.map { it.id }.toSet()
+        val remainingStrokes = currentData.strokes.filterNot { selectedStrokeIds.contains(it.id) || selectedStrokes.contains(it) }
+        val remainingShapes = currentData.shapes.filterNot { selectedShapes.contains(it) }
+        val remainingTexts = currentData.textItems.filterNot { selectedTexts.contains(it) }
+        val remainingMedias = currentData.mediaItems.filterNot { selectedMedias.contains(it) }
+
+        updatePageData(
+            pageId = pageId,
+            strokes = remainingStrokes,
+            shapes = remainingShapes,
+            textItems = remainingTexts,
+            mediaItems = remainingMedias
+        )
+
+        _uiState.update {
+            it.copy(
+                hasSelection = false,
+                lassoSelectedStrokes = emptyList(),
+                lassoSelectedShapes = emptyList(),
+                lassoSelectedTextItems = emptyList(),
+                lassoSelectedMediaItems = emptyList(),
+                lassoSelectionBounds = null
+            )
         }
-        val updatedShapes = _uiState.value.shapes.map { s ->
-            if (selectedShapeIds.contains(s.id)) s.copy(strokeColor = color) else s
+        scheduleAutoSaveForPage(pageId)
+    }
+
+    fun changeLassoColor(color: Color, targetPageId: Long? = null) {
+        val pageId = targetPageId ?: currentPage?.id ?: return
+        val currentData = _uiState.value.pagesData[pageId] ?: return
+
+        val selectedStrokes = _uiState.value.lassoSelectedStrokes
+        val selectedShapes = _uiState.value.lassoSelectedShapes
+        val selectedTexts = _uiState.value.lassoSelectedTextItems
+
+        if (selectedStrokes.isEmpty() && selectedShapes.isEmpty() && selectedTexts.isEmpty()) return
+
+        pushUndoSnapshot()
+        val updatedStrokes = currentData.strokes.map { s ->
+            if (selectedStrokes.contains(s)) s.copy(color = color) else s
         }
-        updateActivePageData(strokes = updatedStrokes, shapes = updatedShapes)
-        scheduleAutoSave()
+        val updatedShapes = currentData.shapes.map { sh ->
+            if (selectedShapes.contains(sh)) sh.copy(strokeColor = color) else sh
+        }
+        val updatedTexts = currentData.textItems.map { t ->
+            if (selectedTexts.contains(t)) t.copy(fontColor = color) else t
+        }
+
+        updatePageData(pageId, strokes = updatedStrokes, shapes = updatedShapes, textItems = updatedTexts)
+        scheduleAutoSaveForPage(pageId)
     }
 
     // Text Boxes
@@ -1358,72 +1402,25 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         scheduleAutoSave()
     }
 
-    // Continuous Auto-Save Engine
+    // Auto-Save Continuous Engine
     private val pageSaveJobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
 
     fun scheduleAutoSaveForPage(pageId: Long) {
-        _uiState.update { it.copy(saveStatus = SaveStatus.SAVING) }
         pageSaveJobs[pageId]?.cancel()
-        val job = persistenceScope.launch {
-            delay(200) // Highly responsive continuous auto-save
-            savePageInternal(pageId)
+        val job = viewModelScope.launch {
+            delay(350)
+            savePageImmediately(pageId)
         }
         pageSaveJobs[pageId] = job
     }
 
     fun savePageImmediately(pageId: Long) {
-        flushPage(pageId)
-    }
-
-    fun saveCurrentPageImmediately(manual: Boolean = false) {
-        val page = currentPage ?: return
-        flushPage(page.id, manual = manual)
-    }
-
-    fun flushAllPages() {
-        val pageIds = _uiState.value.pagesData.keys.toList()
-        pageIds.forEach { pageId ->
-            flushPage(pageId, manual = false)
-        }
-    }
-
-    fun flushPage(pageId: Long, manual: Boolean = false) {
-        pageSaveJobs[pageId]?.cancel()
-        persistenceScope.launch {
-            withContext(NonCancellable) {
-                savePageInternal(pageId)
-            }
-        }
-    }
-
-    private suspend fun savePageInternal(pageId: Long) {
         val pageData = _uiState.value.pagesData[pageId] ?: return
-        try {
-            _uiState.update { it.copy(saveStatus = SaveStatus.SAVING) }
-            repository.saveEntirePageContent(
-                pageId = pageId,
-                strokes = pageData.strokes,
-                shapes = pageData.shapes,
-                textItems = pageData.textItems,
-                mediaItems = pageData.mediaItems
-            )
-            _uiState.update {
-                it.copy(
-                    saveStatus = SaveStatus.SAVED,
-                    lastSavedTimeMillis = System.currentTimeMillis(),
-                    saveErrorMessage = null
-                )
-            }
-            Log.d("NoteCanvasViewModel", "Auto-saved page $pageId (${pageData.strokes.size} strokes) successfully")
-            authRepository.triggerSync()
-        } catch (e: Exception) {
-            Log.e("NoteCanvasViewModel", "Auto-save failed for page $pageId", e)
-            _uiState.update {
-                it.copy(
-                    saveStatus = SaveStatus.ERROR,
-                    saveErrorMessage = e.message ?: "Failed to write note changes to disk."
-                )
-            }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.saveStrokesForPage(pageId, pageData.strokes)
+            repository.saveShapesForPage(pageId, pageData.shapes)
+            repository.saveTextItemsForPage(pageId, pageData.textItems)
+            repository.saveMediaItemsForPage(pageId, pageData.mediaItems)
         }
     }
 
@@ -1433,11 +1430,16 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
             scheduleAutoSaveForPage(currentId)
         } else {
             autoSaveJob?.cancel()
-            autoSaveJob = persistenceScope.launch {
-                delay(200)
+            autoSaveJob = viewModelScope.launch {
+                delay(350)
                 saveCurrentPageImmediately()
             }
         }
+    }
+
+    fun saveCurrentPageImmediately() {
+        val page = currentPage ?: return
+        savePageImmediately(page.id)
     }
 
     fun updatePageData(
@@ -1513,17 +1515,23 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update { it.copy(showExportDialog = show) }
     }
 
-    fun exportAsPdf(onShared: (File) -> Unit) {
+    fun exportAsPdf(selectedPageIds: List<Long>? = null, onShared: (File) -> Unit) {
         val nb = _uiState.value.notebook ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isExporting = true) }
-            saveCurrentPageImmediately()
-            val pages = repository.getPagesList(nb.id)
+            saveAllPendingChangesImmediately()
+            val allPages = repository.getPagesList(nb.id)
+            val pages = if (!selectedPageIds.isNullOrEmpty()) {
+                allPages.filter { selectedPageIds.contains(it.id) }
+            } else {
+                allPages
+            }
             val pdfFile = PdfManager.exportNotebookToPdf(
                 context = getApplication(),
                 notebookTitle = nb.title,
                 pages = pages,
-                repository = repository
+                repository = repository,
+                pagesDataMap = _uiState.value.pagesData
             )
             _uiState.update { it.copy(isExporting = false, showExportDialog = false) }
             onShared(pdfFile)
@@ -1623,9 +1631,126 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun saveAllPendingChangesImmediately() {
+        val currentMap = _uiState.value.pagesData
+        viewModelScope.launch(Dispatchers.IO + NonCancellable) {
+            currentMap.forEach { (pageId, pageData) ->
+                repository.saveStrokesForPage(pageId, pageData.strokes)
+                repository.saveShapesForPage(pageId, pageData.shapes)
+                repository.saveTextItemsForPage(pageId, pageData.textItems)
+                repository.saveMediaItemsForPage(pageId, pageData.mediaItems)
+            }
+        }
+    }
+
+    fun manualSaveNote() {
+        saveAllPendingChangesImmediately()
+        _uiState.update { it.copy(saveNotificationMessage = "All changes saved locally to device") }
+        viewModelScope.launch {
+            delay(2000)
+            _uiState.update { it.copy(saveNotificationMessage = null) }
+        }
+    }
+
+    fun setPalmRejectionMode(mode: PalmRejectionMode) {
+        settingsManager.palmRejectionMode = mode
+        _uiState.update { it.copy(palmRejectionMode = mode) }
+    }
+
+    fun setShowSettingsDialog(show: Boolean) {
+        _uiState.update { it.copy(showSettingsDialog = show) }
+    }
+
+    fun speakCurrentNotes() {
+        viewModelScope.launch {
+            val content = buildNotebookContentString()
+            if (content.isNotBlank()) {
+                ttsManager.speak(content)
+            } else {
+                _uiState.update { it.copy(saveNotificationMessage = "No text content to read aloud") }
+                delay(2000)
+                _uiState.update { it.copy(saveNotificationMessage = null) }
+            }
+        }
+    }
+
+    fun stopSpeakingNotes() {
+        ttsManager.stop()
+    }
+
+    fun downloadPdfToDevice(context: Context, selectedPageIds: List<Long>? = null) {
+        val nb = _uiState.value.notebook ?: return
+        val allPages = _uiState.value.pages
+        val pages = if (!selectedPageIds.isNullOrEmpty()) {
+            allPages.filter { selectedPageIds.contains(it.id) }
+        } else {
+            allPages
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(isExporting = true) }
+            try {
+                saveAllPendingChangesImmediately()
+                val tempPdf = withContext(Dispatchers.IO) {
+                    PdfManager.exportNotebookToPdf(
+                        context = context,
+                        notebookTitle = nb.title,
+                        pages = pages,
+                        repository = repository,
+                        pagesDataMap = _uiState.value.pagesData
+                    )
+                }
+                val safeTitle = nb.title.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+                val fileName = "${safeTitle}_${System.currentTimeMillis()}.pdf"
+                val savedUri = withContext(Dispatchers.IO) {
+                    DownloadUtils.saveFileToDownloads(
+                        context = context,
+                        sourceFile = tempPdf,
+                        targetFileName = fileName,
+                        mimeType = "application/pdf"
+                    )
+                }
+                val msg = if (savedUri != null) "Saved to Downloads: $fileName" else "Failed to save PDF to Downloads"
+                _uiState.update { it.copy(isExporting = false, showExportDialog = false, saveNotificationMessage = msg) }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(isExporting = false, saveNotificationMessage = "Export failed: ${e.message}") }
+            }
+            delay(3000)
+            _uiState.update { it.copy(saveNotificationMessage = null) }
+        }
+    }
+
+    fun downloadRecordingToDevice(context: Context, recording: AudioRecordingEntity) {
+        viewModelScope.launch {
+            try {
+                val sourceFile = File(recording.filePath)
+                if (sourceFile.exists()) {
+                    val safeTitle = recording.title.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+                    val fileName = "${safeTitle}_${System.currentTimeMillis()}.m4a"
+                    val savedUri = withContext(Dispatchers.IO) {
+                        DownloadUtils.saveFileToDownloads(
+                            context = context,
+                            sourceFile = sourceFile,
+                            targetFileName = fileName,
+                            mimeType = "audio/mp4"
+                        )
+                    }
+                    val msg = if (savedUri != null) "Saved recording to Downloads: $fileName" else "Failed to save recording"
+                    _uiState.update { it.copy(saveNotificationMessage = msg) }
+                } else {
+                    _uiState.update { it.copy(saveNotificationMessage = "Recording file not found") }
+                }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(saveNotificationMessage = "Save failed: ${e.message}") }
+            }
+            delay(3000)
+            _uiState.update { it.copy(saveNotificationMessage = null) }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
-        flushAllPages()
+        saveAllPendingChangesImmediately()
+        ttsManager.release()
         recorderManager.stopRecording()
         playerManager.stop()
     }

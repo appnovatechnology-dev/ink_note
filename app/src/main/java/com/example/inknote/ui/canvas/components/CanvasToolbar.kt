@@ -29,12 +29,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.platform.testTag
 import com.example.inknote.data.model.ShapeType
 import com.example.inknote.data.model.ToolType
 import com.example.ui.theme.NoteInkColors
 import com.example.inknote.viewmodel.EraserMode
-import com.example.inknote.viewmodel.SaveStatus
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,12 +41,9 @@ fun CanvasTopAppBar(
     notebookTitle: String,
     canUndo: Boolean,
     canRedo: Boolean,
-    isPalmRejectionActive: Boolean,
     isLocked: Boolean,
-    saveStatus: SaveStatus = SaveStatus.SAVED,
-    saveErrorMessage: String? = null,
+    isSpeakingNotes: Boolean = false,
     onBack: () -> Unit,
-    onSave: () -> Unit = {},
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onExport: () -> Unit,
@@ -58,16 +53,16 @@ fun CanvasTopAppBar(
     onOpenSummary: () -> Unit = {},
     onOpenSnapshots: () -> Unit = {},
     onOpenSecurity: () -> Unit = {},
-    onTogglePalmRejection: () -> Unit = {}
+    onManualSave: () -> Unit = {},
+    onSpeakNotes: () -> Unit = {},
+    onStopSpeakingNotes: () -> Unit = {},
+    onOpenSettings: () -> Unit = {}
 ) {
     var showMoreMenu by remember { mutableStateOf(false) }
 
     TopAppBar(
         title = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     text = notebookTitle,
                     maxLines = 1,
@@ -82,63 +77,6 @@ fun CanvasTopAppBar(
                         modifier = Modifier.size(16.dp)
                     )
                 }
-
-                // Continuous Auto-Save Status Indicator
-                when (saveStatus) {
-                    SaveStatus.SAVING -> {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(10.dp),
-                                strokeWidth = 1.5.dp,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text("Saving...", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                    SaveStatus.SAVED -> {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color(0xFF10B981).copy(alpha = 0.12f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.CheckCircle,
-                                contentDescription = "Saved locally",
-                                tint = Color(0xFF10B981),
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Text("Saved", fontSize = 11.sp, color = Color(0xFF047857), fontWeight = FontWeight.Medium)
-                        }
-                    }
-                    SaveStatus.ERROR -> {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.ErrorOutline,
-                                contentDescription = "Save Error: $saveErrorMessage",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Text("Save Failed", fontSize = 11.sp, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Medium)
-                        }
-                    }
-                }
             }
         },
         navigationIcon = {
@@ -147,21 +85,20 @@ fun CanvasTopAppBar(
             }
         },
         actions = {
-            IconButton(
-                onClick = onSave,
-                modifier = Modifier.testTag("button_manual_save")
-            ) {
-                Icon(
-                    Icons.Default.Save,
-                    contentDescription = "Save Note Now",
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
             IconButton(onClick = onUndo, enabled = canUndo) {
                 Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo", tint = if (canUndo) MaterialTheme.colorScheme.onSurface else Color.LightGray)
             }
             IconButton(onClick = onRedo, enabled = canRedo) {
                 Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Redo", tint = if (canRedo) MaterialTheme.colorScheme.onSurface else Color.LightGray)
+            }
+            if (isSpeakingNotes) {
+                IconButton(onClick = onStopSpeakingNotes) {
+                    Icon(Icons.Default.VolumeOff, contentDescription = "Stop Reading Aloud", tint = Color(0xFFDC2626))
+                }
+            } else {
+                IconButton(onClick = onSpeakNotes) {
+                    Icon(Icons.Default.VolumeUp, contentDescription = "Read Note Aloud", tint = MaterialTheme.colorScheme.primary)
+                }
             }
             IconButton(onClick = onOpenStudyHub) {
                 Icon(Icons.Default.School, contentDescription = "Flashcards & Quizzes", tint = MaterialTheme.colorScheme.primary)
@@ -181,6 +118,14 @@ fun CanvasTopAppBar(
                     onDismissRequest = { showMoreMenu = false }
                 ) {
                     DropdownMenuItem(
+                        text = { Text("Save Note Now") },
+                        leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
+                        onClick = {
+                            showMoreMenu = false
+                            onManualSave()
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Version History & Snapshots") },
                         leadingIcon = { Icon(Icons.Default.History, contentDescription = null) },
                         onClick = {
@@ -197,19 +142,20 @@ fun CanvasTopAppBar(
                         }
                     )
                     DropdownMenuItem(
-                        text = { Text(if (isPalmRejectionActive) "Palm Rejection: ON" else "Palm Rejection: OFF") },
-                        leadingIcon = { Icon(Icons.Default.PanTool, contentDescription = null) },
-                        onClick = {
-                            showMoreMenu = false
-                            onTogglePalmRejection()
-                        }
-                    )
-                    DropdownMenuItem(
                         text = { Text("Audio Recordings List") },
                         leadingIcon = { Icon(Icons.Default.AudioFile, contentDescription = null) },
                         onClick = {
                             showMoreMenu = false
                             onOpenAudioList()
+                        }
+                    )
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("App Settings (Storage)") },
+                        leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                        onClick = {
+                            showMoreMenu = false
+                            onOpenSettings()
                         }
                     )
                 }
@@ -373,6 +319,8 @@ fun DockableToolbar(
     penWidth: Float,
     highlighterColor: Color,
     highlighterWidth: Float,
+    laserColor: Color = Color(0xFFEF4444),
+    isLaserTailEnabled: Boolean = true,
     isMagicInkEnabled: Boolean,
     isGridSnapEnabled: Boolean,
     rulerActive: Boolean,
@@ -382,6 +330,8 @@ fun DockableToolbar(
     onSetPenColor: (Color) -> Unit,
     onSetPenWidth: (Float) -> Unit,
     onSetHighlighterColor: (Color) -> Unit,
+    onSetLaserColor: (Color) -> Unit = {},
+    onToggleLaserTail: () -> Unit = {},
     onToggleMagicInk: () -> Unit,
     onToggleGridSnap: () -> Unit,
     onToggleRuler: () -> Unit,
@@ -403,55 +353,103 @@ fun DockableToolbar(
             .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(20.dp))
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
-        // Color & Stroke Palette popup
+        // Color & Stroke / Laser Palette popup
         AnimatedVisibility(visible = showColorPalette) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 8.dp)
             ) {
-                // Color swatches
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(vertical = 4.dp)
-                ) {
-                    items(NoteInkColors) { color ->
-                        val isSelected = if (activeTool == ToolType.HIGHLIGHTER) highlighterColor == color else penColor == color
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(CircleShape)
-                                .background(color)
-                                .border(
-                                    width = if (isSelected) 2.5.dp else 0.dp,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    shape = CircleShape
+                if (activeTool == ToolType.LASER) {
+                    // Laser color swatches
+                    val laserColors = listOf(
+                        Color(0xFFEF4444), // Red
+                        Color(0xFF10B981), // Green
+                        Color(0xFF3B82F6), // Blue
+                        Color(0xFFA855F7), // Purple
+                        Color(0xFFF59E0B)  // Gold
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            laserColors.forEach { color ->
+                                val isSelected = laserColor == color
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clip(CircleShape)
+                                        .background(color)
+                                        .border(
+                                            width = if (isSelected) 2.5.dp else 0.dp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            shape = CircleShape
+                                        )
+                                        .clickable { onSetLaserColor(color) }
                                 )
-                                .clickable {
-                                    if (activeTool == ToolType.HIGHLIGHTER) onSetHighlighterColor(color) else onSetPenColor(color)
-                                }
+                            }
+                        }
+
+                        // Tail Toggle Button
+                        FilterChip(
+                            selected = isLaserTailEnabled,
+                            onClick = onToggleLaserTail,
+                            label = { Text(if (isLaserTailEnabled) "Trail: ON" else "Trail: OFF", fontSize = 11.sp) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (isLaserTailEnabled) Icons.Default.Timeline else Icons.Default.Adjust,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         )
                     }
-                }
+                } else {
+                    // Color swatches for Pen / Highlighter
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    ) {
+                        items(NoteInkColors) { color ->
+                            val isSelected = if (activeTool == ToolType.HIGHLIGHTER) highlighterColor == color else penColor == color
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(color)
+                                    .border(
+                                        width = if (isSelected) 2.5.dp else 0.dp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        shape = CircleShape
+                                    )
+                                    .clickable {
+                                        if (activeTool == ToolType.HIGHLIGHTER) onSetHighlighterColor(color) else onSetPenColor(color)
+                                    }
+                            )
+                        }
+                    }
 
-                // Stroke Width presets
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    listOf(2f, 3.5f, 6f, 10f).forEach { width ->
-                        val isSelected = penWidth == width
-                        Button(
-                            onClick = { onSetPenWidth(width) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                                contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                            ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                            modifier = Modifier.height(28.dp)
-                        ) {
-                            Text("${width.toInt()}pt", fontSize = 11.sp)
+                    // Stroke Width presets
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf(2f, 3.5f, 6f, 10f).forEach { width ->
+                            val isSelected = penWidth == width
+                            Button(
+                                onClick = { onSetPenWidth(width) },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier.height(28.dp)
+                            ) {
+                                Text("${width.toInt()}pt", fontSize = 11.sp)
+                            }
                         }
                     }
                 }
@@ -519,6 +517,25 @@ fun DockableToolbar(
                     onClick = {
                         onSelectTool(ToolType.LASSO)
                         showColorPalette = false
+                    }
+                )
+            }
+
+            // Laser Pointer Tool
+            item {
+                ToolButton(
+                    icon = Icons.Default.Highlight,
+                    label = "Laser",
+                    isSelected = activeTool == ToolType.LASER,
+                    indicatorColor = laserColor,
+                    activeColor = laserColor,
+                    onClick = {
+                        if (activeTool == ToolType.LASER) {
+                            showColorPalette = !showColorPalette
+                        } else {
+                            onSelectTool(ToolType.LASER)
+                            showColorPalette = true
+                        }
                     }
                 )
             }

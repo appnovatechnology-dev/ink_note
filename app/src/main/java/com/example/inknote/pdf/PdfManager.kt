@@ -13,37 +13,13 @@ import androidx.compose.ui.graphics.toArgb
 import com.example.inknote.data.db.entities.PageEntity
 import com.example.inknote.data.model.*
 import com.example.inknote.data.repository.NoteRepository
+import com.example.inknote.viewmodel.PageDataState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
 object PdfManager {
-
-    fun getOriginalFileName(context: Context, uri: Uri): String {
-        var name: String? = null
-        if (uri.scheme == "content") {
-            try {
-                context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                        if (index != -1) {
-                            name = cursor.getString(index)
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore and fall back
-            }
-        }
-        if (name.isNullOrBlank()) {
-            name = uri.lastPathSegment?.substringAfterLast('/')?.substringAfterLast(':')
-        }
-        if (name.isNullOrBlank()) {
-            name = "Document"
-        }
-        return name ?: "Document"
-    }
 
     suspend fun importPdfToNotebook(
         context: Context,
@@ -98,7 +74,8 @@ object PdfManager {
         context: Context,
         notebookTitle: String,
         pages: List<PageEntity>,
-        repository: NoteRepository
+        repository: NoteRepository,
+        pagesDataMap: Map<Long, PageDataState> = emptyMap()
     ): File = withContext(Dispatchers.IO) {
         val pdfDocument = PdfDocument()
         val exportDir = File(context.cacheDir, "exports")
@@ -136,21 +113,22 @@ object PdfManager {
                 drawTemplate(canvas, pageEntity.templateType, pageWidth.toFloat(), pageHeight.toFloat())
             }
 
+            val cachedData = pagesDataMap[pageEntity.id]
+
             // 2. Draw Shapes
-            val shapes = repository.getShapesForPage(pageEntity.id)
-            val shapesList = repository.getShapesListForExport(pageEntity.id)
+            val shapesList = cachedData?.shapes ?: repository.getShapesListForExport(pageEntity.id)
             drawShapesOnCanvas(canvas, shapesList)
 
-            // 3. Draw Strokes (Pen & Highlighter)
-            val strokesList = repository.getStrokesListForExport(pageEntity.id)
+            // 3. Draw Strokes (Pen & Highlighter - Laser pointer is never included)
+            val strokesList = cachedData?.strokes ?: repository.getStrokesListForExport(pageEntity.id)
             drawStrokesOnCanvas(canvas, strokesList)
 
             // 4. Draw Text items
-            val textList = repository.getTextListForExport(pageEntity.id)
+            val textList = cachedData?.textItems ?: repository.getTextListForExport(pageEntity.id)
             drawTextItemsOnCanvas(canvas, textList)
 
             // 5. Draw Media items
-            val mediaList = repository.getMediaListForExport(pageEntity.id)
+            val mediaList = cachedData?.mediaItems ?: repository.getMediaListForExport(pageEntity.id)
             drawMediaItemsOnCanvas(canvas, mediaList)
 
             pdfDocument.finishPage(pdfPage)

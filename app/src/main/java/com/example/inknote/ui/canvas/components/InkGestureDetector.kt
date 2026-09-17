@@ -1,11 +1,16 @@
 package com.example.inknote.ui.canvas.components
 
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
+import android.content.Context
+import android.hardware.input.InputManager
+import android.view.InputDevice
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
 import kotlin.math.hypot
+
+import com.example.inknote.data.model.PalmRejectionMode
 
 /**
  * State holding hardware pointer detection information and managing palm rejection.
@@ -13,7 +18,7 @@ import kotlin.math.hypot
 class StylusInputState(
     var isStylusActive: Boolean = false,
     var lastStylusTimestamp: Long = 0L,
-    private val palmRejectionTimeoutMs: Long = 1500L
+    private val palmRejectionTimeoutMs: Long = 3000L
 ) {
     fun recordStylusEvent() {
         isStylusActive = true
@@ -24,15 +29,53 @@ class StylusInputState(
         return isStylusActive && (System.currentTimeMillis() - lastStylusTimestamp < palmRejectionTimeoutMs)
     }
 
+    fun isStylusConnectedOrActive(context: Context? = null): Boolean {
+        if (isStylusActive) return true
+        if (context != null) {
+            try {
+                val inputManager = context.getSystemService(Context.INPUT_SERVICE) as? InputManager
+                val deviceIds = inputManager?.inputDeviceIds ?: return false
+                for (id in deviceIds) {
+                    val device = inputManager.getInputDevice(id) ?: continue
+                    val sources = device.sources
+                    if ((sources and InputDevice.SOURCE_STYLUS) == InputDevice.SOURCE_STYLUS ||
+                        (sources and InputDevice.SOURCE_BLUETOOTH_STYLUS) == InputDevice.SOURCE_BLUETOOTH_STYLUS) {
+                        isStylusActive = true
+                        return true
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        return false
+    }
+
     /**
-     * Determines whether an incoming pointer event should be ignored for reliable palm rejection.
-     * When a stylus is active, ONLY stylus pointers can produce ink.
+     * Determines whether an incoming pointer event should be ignored for drawing ink.
+     * When rejected, the event is left unconsumed so fingers can freely scroll and pinch-zoom.
      */
-    fun shouldRejectTouch(pointerType: PointerType, palmRejectionEnabled: Boolean): Boolean {
-        if (!palmRejectionEnabled) return false
-        // Stylus and Eraser pointers are always accepted as active drawing tools
+    fun shouldRejectTouch(
+        pointerType: PointerType,
+        mode: PalmRejectionMode = PalmRejectionMode.STYLUS_ONLY,
+        allowTouch: Boolean = false,
+        hasActiveStylus: Boolean = isStylusActive
+    ): Boolean {
+        // Stylus and Eraser pointers are always accepted for drawing
         if (pointerType == PointerType.Stylus || pointerType == PointerType.Eraser) return false
-        // Reject Touch (finger/palm) if stylus is active or was recently detected
+
+        // If tool explicitly allows touch (e.g. Lasso, Text, Shape, Laser)
+        if (allowTouch) return false
+
+        // OFF mode: Both fingers and stylus can produce ink
+        if (mode == PalmRejectionMode.OFF) return false
+
+        // STYLUS_ONLY mode:
+        // When in Stylus Only mode and a stylus is connected/active, finger and palm touches NEVER draw ink.
+        // If no stylus has ever been active/connected, we allow touch so touch-only devices are usable.
+        if (mode == PalmRejectionMode.STYLUS_ONLY) {
+            return hasActiveStylus
+        }
+
+        // AUTO mode: Reject finger/palm touch if stylus is active or was recently detected
         return isStylusRecentlyActive()
     }
 
@@ -44,12 +87,16 @@ class StylusInputState(
 
 /**
  * Custom PointerInputScope gesture detector that explicitly distinguishes between 'stylus' and 'touch'
- * pointer types. When a stylus is detected, touch events are ignored to ensure reliable palm rejection.
- * Provides high-performance multi-touch pinch-to-zoom in and out without accidental ink strokes.
+ * pointer types.
+ *
+ * Fully supports resting a palm flat on the screen while writing sentences with a stylus,
+ * touching with a second finger mid-stroke without interrupting the stroke, and rapidly lifting
+ * and replacing the stylus with zero stray marks.
  */
 suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
     inputState: StylusInputState,
-    palmRejectionEnabled: Boolean,
+    getPalmRejectionMode: () -> PalmRejectionMode,
+    getAllowTouch: () -> Boolean,
     onGestureStart: (isStylus: Boolean, pointerType: PointerType, startPosition: Offset, pressure: Float) -> Unit,
     onGestureMove: (isStylus: Boolean, currentPosition: Offset, pressure: Float) -> Unit,
     onGestureEnd: (isStylus: Boolean, wasDrag: Boolean, lastPosition: Offset) -> Unit,
@@ -57,133 +104,160 @@ suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
     onPinchStart: () -> Unit = {},
     onPinchEnd: () -> Unit = {}
 ) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        val pointerType = down.type
-        val isStylus = pointerType == PointerType.Stylus || pointerType == PointerType.Eraser
+    awaitPointerEventScope {
+        var activeTrackingPointerId: PointerId? = null
+        var activeTrackingIsStylus = false
+        var activeTrackingLastPos = Offset.Zero
+        var activeTrackingIsDrag = false
 
-        if (isStylus) {
-            inputState.recordStylusEvent()
-        }
-
-        // Palm Rejection: When stylus is active or palm rejection is enabled for touch,
-        // do not consume the touch so that the parent view can scroll
-        if (inputState.shouldRejectTouch(pointerType, palmRejectionEnabled)) {
-            return@awaitEachGesture
-        }
-
-        var isDrag = false
         var isPinching = false
-        var hadPinch = false
-        var lastPosition = down.position
-        val pointerId = down.id
         var previousPinchDistance = 0.0
-        var gestureStarted = false
-
-        // Do not immediately start drawing if this might be a multi-touch gesture
-        val startPressure = if (down.pressure > 0f) down.pressure else 1.0f
-        onGestureStart(isStylus, pointerType, down.position, startPressure)
-        gestureStarted = true
 
         while (true) {
-            val event = awaitPointerEvent()
-            val pressedChanges = event.changes.filter { it.pressed }
+            val event = awaitPointerEvent(PointerEventPass.Main)
+            val currentMode = getPalmRejectionMode()
+            val currentAllowTouch = getAllowTouch()
 
-            // Multi-finger pinch-to-zoom / transform detection (2 or more fingers)
-            if (pressedChanges.size >= 2) {
+            // Record stylus presence on any stylus contact or hover
+            for (change in event.changes) {
+                if (change.type == PointerType.Stylus || change.type == PointerType.Eraser) {
+                    inputState.recordStylusEvent()
+                }
+            }
+            val hasActiveStylus = inputState.isStylusActive
+
+            // 1. If we are currently tracking an active stroke:
+            if (activeTrackingPointerId != null) {
+                val trackingChange = event.changes.firstOrNull { it.id == activeTrackingPointerId }
+
+                if (trackingChange == null || !trackingChange.pressed) {
+                    // Active drawing pointer was lifted
+                    trackingChange?.consume()
+                    onGestureEnd(activeTrackingIsStylus, activeTrackingIsDrag, activeTrackingLastPos)
+                    activeTrackingPointerId = null
+                    activeTrackingIsStylus = false
+                    activeTrackingIsDrag = false
+                } else {
+                    // Active drawing pointer moved
+                    val newPos = trackingChange.position
+                    val dist = hypot(
+                        (newPos.x - activeTrackingLastPos.x).toDouble(),
+                        (newPos.y - activeTrackingLastPos.y).toDouble()
+                    )
+                    if (dist > 1.5) {
+                        activeTrackingIsDrag = true
+                    }
+                    trackingChange.consume()
+                    activeTrackingLastPos = newPos
+                    val pressure = if (trackingChange.pressure > 0f) trackingChange.pressure else 1.0f
+                    onGestureMove(activeTrackingIsStylus, activeTrackingLastPos, pressure)
+                }
+
+                // While actively drawing with stylus, ANY simultaneous palm or finger touch
+                // is ignored: zero stray marks, no aborted stroke, no accidental pinch.
+                continue
+            }
+
+            // 2. Not currently drawing a stroke.
+            // Check for multi-touch pinch-to-zoom (ONLY between touch fingers when NO stylus is active)
+            val pressedTouchChanges = event.changes.filter { it.pressed && it.type == PointerType.Touch }
+            val hasStylusPressed = event.changes.any { it.pressed && (it.type == PointerType.Stylus || it.type == PointerType.Eraser) }
+
+            if (pressedTouchChanges.size >= 2 && !hasStylusPressed) {
                 if (!isPinching) {
                     isPinching = true
-                    hadPinch = true
                     previousPinchDistance = 0.0
                     onPinchStart()
                 }
-
-                val p1 = pressedChanges[0]
-                val p2 = pressedChanges[1]
-                val currDist = hypot((p1.position.x - p2.position.x).toDouble(), (p1.position.y - p2.position.y).toDouble())
-
+                val p1 = pressedTouchChanges[0]
+                val p2 = pressedTouchChanges[1]
+                val currDist = hypot(
+                    (p1.position.x - p2.position.x).toDouble(),
+                    (p1.position.y - p2.position.y).toDouble()
+                )
                 if (previousPinchDistance > 5.0 && currDist > 5.0) {
-                    val rawFactor = (currDist / previousPinchDistance).toFloat()
-                    if (rawFactor in 0.5f..2.0f) {
-                        onPinchZoom(rawFactor)
+                    val factor = (currDist / previousPinchDistance).toFloat()
+                    if (factor in 0.5f..2.0f) {
+                        onPinchZoom(factor)
                     }
                 }
                 previousPinchDistance = currDist
-
-                // Allow transformation gestures to process without drawing strokes
-                if (event.changes.none { it.pressed }) {
-                    onPinchEnd()
-                    break
-                }
                 continue
             } else if (isPinching) {
-                // Fingers lifted after a pinch
                 isPinching = false
                 previousPinchDistance = 0.0
                 onPinchEnd()
-
-                if (pressedChanges.isEmpty()) {
-                    break
-                }
-                continue
             }
 
-            // If a pinch occurred at any point during this gesture sequence, discard ink strokes
-            if (hadPinch) {
-                if (pressedChanges.isEmpty()) {
-                    break
-                }
-                continue
+            // 3. Check for new stroke down:
+            // Priority 1: Stylus pointer down (even if a palm is already resting flat on the screen!)
+            val stylusDown = event.changes.firstOrNull {
+                it.pressed && (it.type == PointerType.Stylus || it.type == PointerType.Eraser)
             }
-
-            // If no fingers are pressed, complete gesture
-            if (pressedChanges.isEmpty()) {
-                if (gestureStarted && !hadPinch) {
-                    onGestureEnd(isStylus, isDrag, lastPosition)
-                }
-                break
-            }
-
-            // Check if a stylus landed while a finger was touching
-            val stylusChange = event.changes.firstOrNull { it.type == PointerType.Stylus || it.type == PointerType.Eraser }
-            if (stylusChange != null) {
+            if (stylusDown != null) {
                 inputState.recordStylusEvent()
-                if (!isStylus && palmRejectionEnabled) {
-                    // Cancel finger touch in favor of stylus
-                    if (gestureStarted && !hadPinch) {
-                        onGestureEnd(false, isDrag, lastPosition)
-                    }
-                    return@awaitEachGesture
-                }
+                stylusDown.consume()
+                activeTrackingPointerId = stylusDown.id
+                activeTrackingIsStylus = true
+                activeTrackingLastPos = stylusDown.position
+                activeTrackingIsDrag = false
+                val pressure = if (stylusDown.pressure > 0f) stylusDown.pressure else 1.0f
+                onGestureStart(true, stylusDown.type, stylusDown.position, pressure)
+                continue
             }
 
-            val change = event.changes.firstOrNull { it.id == pointerId }
-            if (change == null) {
-                if (isDrag && gestureStarted && !hadPinch) {
-                    onGestureEnd(isStylus, isDrag, lastPosition)
-                }
-                break
-            }
+            // Priority 2: Non-stylus pointer (finger / mouse)
+            val candidateDown = event.changes.firstOrNull { it.pressed }
+            if (candidateDown != null) {
+                val shouldReject = inputState.shouldRejectTouch(
+                    pointerType = candidateDown.type,
+                    mode = currentMode,
+                    allowTouch = currentAllowTouch,
+                    hasActiveStylus = hasActiveStylus
+                )
 
-            if (change.pressed) {
-                val dist = hypot((change.position.x - lastPosition.x).toDouble(), (change.position.y - lastPosition.y).toDouble())
-                if (dist > 1.5) {
-                    isDrag = true
+                if (!shouldReject) {
+                    candidateDown.consume()
+                    activeTrackingPointerId = candidateDown.id
+                    activeTrackingIsStylus = false
+                    activeTrackingLastPos = candidateDown.position
+                    activeTrackingIsDrag = false
+                    val pressure = if (candidateDown.pressure > 0f) candidateDown.pressure else 1.0f
+                    onGestureStart(false, candidateDown.type, candidateDown.position, pressure)
+                } else {
+                    // Rejected for drawing! Event is left unconsumed so LazyColumn can scroll smoothly.
+                    // The pointer loop continues to run without blocking, ensuring that when the stylus
+                    // touches the screen, it is immediately detected.
                 }
-                change.consume()
-                lastPosition = change.position
-                if (isStylus) {
-                    inputState.recordStylusEvent()
-                }
-                val pressure = if (change.pressure > 0f) change.pressure else 1.0f
-                onGestureMove(isStylus, change.position, pressure)
-            } else {
-                change.consume()
-                if (gestureStarted && !hadPinch) {
-                    onGestureEnd(isStylus, isDrag, lastPosition)
-                }
-                break
             }
         }
     }
 }
+
+/**
+ * Backward compatibility overload for existing call sites.
+ */
+suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
+    inputState: StylusInputState,
+    palmRejectionMode: PalmRejectionMode = PalmRejectionMode.STYLUS_ONLY,
+    allowTouch: Boolean = false,
+    onGestureStart: (isStylus: Boolean, pointerType: PointerType, startPosition: Offset, pressure: Float) -> Unit,
+    onGestureMove: (isStylus: Boolean, currentPosition: Offset, pressure: Float) -> Unit,
+    onGestureEnd: (isStylus: Boolean, wasDrag: Boolean, lastPosition: Offset) -> Unit,
+    onPinchZoom: (zoomFactor: Float) -> Unit,
+    onPinchStart: () -> Unit = {},
+    onPinchEnd: () -> Unit = {}
+) {
+    detectInkGesturesWithPalmRejection(
+        inputState = inputState,
+        getPalmRejectionMode = { palmRejectionMode },
+        getAllowTouch = { allowTouch },
+        onGestureStart = onGestureStart,
+        onGestureMove = onGestureMove,
+        onGestureEnd = onGestureEnd,
+        onPinchZoom = onPinchZoom,
+        onPinchStart = onPinchStart,
+        onPinchEnd = onPinchEnd
+    )
+}
+

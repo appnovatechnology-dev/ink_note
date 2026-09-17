@@ -30,7 +30,6 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -41,12 +40,15 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
 import com.example.inknote.data.db.entities.PageEntity
 import com.example.inknote.data.model.*
 import com.example.inknote.geometry.GeometryEngine
 import com.example.inknote.viewmodel.EraserMode
 import java.io.File
 import kotlin.math.*
+
+data class LaserPoint(val offset: Offset, val timestamp: Long)
 
 @Composable
 fun InkDrawingCanvas(
@@ -64,7 +66,8 @@ fun InkDrawingCanvas(
     eraserWidth: Float,
     isMagicInkEnabled: Boolean,
     isGridSnapEnabled: Boolean,
-    isPalmRejectionEnabled: Boolean,
+    laserColor: Color = Color(0xFFEF4444),
+    isLaserTailEnabled: Boolean = true,
     rulerState: RulerState,
     protractorState: ProtractorState,
     compassState: CompassState,
@@ -78,21 +81,18 @@ fun InkDrawingCanvas(
     isPlayingAudio: Boolean,
     zoomScale: Float = 1.0f,
     isFitToScreen: Boolean = false,
+    palmRejectionMode: PalmRejectionMode = PalmRejectionMode.STYLUS_ONLY,
+    sharedStylusInputState: StylusInputState? = null,
     hasLassoSelection: Boolean = false,
     lassoSelectionBounds: Rect? = null,
-    selectedStrokeIds: Set<Long> = emptySet(),
-    selectedShapeIds: Set<Long> = emptySet(),
-    selectedTextIds: Set<Long> = emptySet(),
+    lassoSelectedStrokes: List<VectorStroke> = emptyList(),
+    lassoSelectedShapes: List<GeometricShape> = emptyList(),
+    lassoSelectedTextItems: List<CanvasTextItem> = emptyList(),
+    lassoSelectedMediaItems: List<CanvasMediaItem> = emptyList(),
     onLassoComplete: ((List<Offset>) -> Unit)? = null,
-    onStartMoveLasso: (() -> Unit)? = null,
     onMoveLasso: ((Float, Float) -> Unit)? = null,
-    onFinishMoveLasso: (() -> Unit)? = null,
-    onCommitMoveLasso: ((Float, Float) -> Unit)? = null,
     onDuplicateLasso: (() -> Unit)? = null,
     onDeleteLasso: (() -> Unit)? = null,
-    onClearLasso: (() -> Unit)? = null,
-    onConvertLassoToText: (() -> Unit)? = null,
-    onConvertLassoToMath: (() -> Unit)? = null,
     onPinchZoom: ((Float) -> Unit)? = null,
     onAddStroke: (VectorStroke) -> Unit,
     onAddShape: (GeometricShape) -> Unit,
@@ -107,26 +107,25 @@ fun InkDrawingCanvas(
 ) {
     var liveStrokePoints by remember { mutableStateOf<List<StrokePoint>>(emptyList()) }
     var liveLassoPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
+    var liveLaserPoints by remember { mutableStateOf<List<LaserPoint>>(emptyList()) }
     var shapeDragStart by remember { mutableStateOf<Offset?>(null) }
     var shapeDragCurrent by remember { mutableStateOf<Offset?>(null) }
-    val stylusInputState = remember { StylusInputState() }
-
-    // Lightweight live drag state for 60/120fps hardware-accelerated preview
-    var dragDeltaPage by remember { mutableStateOf(Offset.Zero) }
-    var isDraggingSelection by remember { mutableStateOf(false) }
-
-    LaunchedEffect(hasLassoSelection, lassoSelectionBounds) {
-        if (!hasLassoSelection) {
-            dragDeltaPage = Offset.Zero
-            isDraggingSelection = false
-        }
-    }
+    var isDraggingLassoSelection by remember { mutableStateOf(false) }
+    var lassoDragStartPoint by remember { mutableStateOf<Offset?>(null) }
+    var liveLassoDragDelta by remember { mutableStateOf(Offset.Zero) }
+    var activeRulerEdge by remember { mutableStateOf(GeometryEngine.RulerEdge.NONE) }
+    val stylusInputState = sharedStylusInputState ?: remember { StylusInputState() }
 
     LaunchedEffect(activeTool, penColor, highlighterColor, activeShapeType, shapeStrokeColor, shapeFillColor) {
         liveStrokePoints = emptyList()
         liveLassoPoints = emptyList()
+        liveLaserPoints = emptyList()
         shapeDragStart = null
         shapeDragCurrent = null
+        isDraggingLassoSelection = false
+        lassoDragStartPoint = null
+        liveLassoDragDelta = Offset.Zero
+        activeRulerEdge = GeometryEngine.RulerEdge.NONE
     }
 
     // Page canvas dimensions (standard A4 ratio: 1000 x 1414)
@@ -174,7 +173,8 @@ fun InkDrawingCanvas(
     val currentRulerState by rememberUpdatedState(rulerState)
     val currentProtractorState by rememberUpdatedState(protractorState)
     val currentIsGridSnapEnabled by rememberUpdatedState(isGridSnapEnabled)
-    val currentIsPalmRejectionEnabled by rememberUpdatedState(isPalmRejectionEnabled)
+    val currentLaserColor by rememberUpdatedState(laserColor)
+    val currentIsLaserTailEnabled by rememberUpdatedState(isLaserTailEnabled)
     val currentZoomScale by rememberUpdatedState(zoomScale)
     val currentOnPinchZoom by rememberUpdatedState(onPinchZoom)
     val currentOnAddStroke by rememberUpdatedState(onAddStroke)
@@ -183,9 +183,29 @@ fun InkDrawingCanvas(
     val currentOnAddTextItem by rememberUpdatedState(onAddTextItem)
     val currentOnJumpAudio by rememberUpdatedState(onJumpAudioToTimestamp)
     val currentOnLassoComplete by rememberUpdatedState(onLassoComplete)
+    val currentOnMoveLasso by rememberUpdatedState(onMoveLasso)
     val currentEraserWidth by rememberUpdatedState(eraserWidth)
     val currentIsPlayingAudio by rememberUpdatedState(isPlayingAudio)
     val currentStrokes by rememberUpdatedState(strokes)
+    val currentShapes by rememberUpdatedState(shapes)
+    val currentTextItems by rememberUpdatedState(textItems)
+    val currentMediaItems by rememberUpdatedState(mediaItems)
+    val currentLassoBounds by rememberUpdatedState(lassoSelectionBounds)
+    val currentHasLassoSelection by rememberUpdatedState(hasLassoSelection)
+    val selectedStrokeIds = remember(lassoSelectedStrokes) { lassoSelectedStrokes.map { it.id }.toSet() }
+    val currentPalmRejectionMode by rememberUpdatedState(palmRejectionMode)
+
+    LaunchedEffect(liveLaserPoints) {
+        if (liveLaserPoints.isNotEmpty()) {
+            delay(16)
+            val now = System.currentTimeMillis()
+            val maxAge = if (currentIsLaserTailEnabled) 750L else 220L
+            val filtered = liveLaserPoints.filter { now - it.timestamp < maxAge }
+            if (filtered.size != liveLaserPoints.size) {
+                liveLaserPoints = filtered
+            }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -202,29 +222,46 @@ fun InkDrawingCanvas(
                 .pointerInput(page?.id) {
                     detectInkGesturesWithPalmRejection(
                         inputState = stylusInputState,
-                        palmRejectionEnabled = currentIsPalmRejectionEnabled,
+                        getPalmRejectionMode = { currentPalmRejectionMode },
+                        getAllowTouch = {
+                            currentActiveTool == ToolType.LASSO ||
+                            currentActiveTool == ToolType.TEXT ||
+                            currentActiveTool == ToolType.SHAPE ||
+                            currentActiveTool == ToolType.LASER
+                        },
                         onGestureStart = { isStylus, pointerType, startPos, startPressure ->
                             val scaleX = pageWidth / size.width
                             val scaleY = pageHeight / size.height
                             var rawX = startPos.x * scaleX
                             var rawY = startPos.y * scaleY
 
-                            if (currentRulerState.isVisible) {
-                                val snapped = GeometryEngine.snapToRuler(
+                            // Check if ruler edge is touched for straight-edge constraint
+                            if (currentRulerState.isVisible && (currentActiveTool == ToolType.PEN || currentActiveTool == ToolType.HIGHLIGHTER)) {
+                                activeRulerEdge = GeometryEngine.identifyRulerEdge(
                                     rawX, rawY,
                                     currentRulerState.centerX, currentRulerState.centerY,
                                     currentRulerState.angleDegrees,
                                     rulerLength = 650f,
                                     rulerThickness = 110f,
-                                    snapThreshold = 65f
+                                    snapThreshold = 80f
                                 )
-                                if (snapped != null) {
-                                    rawX = snapped.first
-                                    rawY = snapped.second
+                                if (activeRulerEdge != GeometryEngine.RulerEdge.NONE) {
+                                    val constrained = GeometryEngine.constrainToRulerEdge(
+                                        rawX, rawY,
+                                        activeRulerEdge,
+                                        currentRulerState.centerX, currentRulerState.centerY,
+                                        currentRulerState.angleDegrees,
+                                        rulerLength = 650f,
+                                        rulerThickness = 110f
+                                    )
+                                    rawX = constrained.first
+                                    rawY = constrained.second
                                 }
+                            } else {
+                                activeRulerEdge = GeometryEngine.RulerEdge.NONE
                             }
 
-                            if (currentIsGridSnapEnabled) {
+                            if (activeRulerEdge == GeometryEngine.RulerEdge.NONE && currentIsGridSnapEnabled) {
                                 val snapped = GeometryEngine.snapToGrid(rawX, rawY)
                                 rawX = snapped.first
                                 rawY = snapped.second
@@ -234,8 +271,21 @@ fun InkDrawingCanvas(
                                 ToolType.PEN, ToolType.HIGHLIGHTER -> {
                                     liveStrokePoints = listOf(StrokePoint(rawX, rawY, startPressure, System.currentTimeMillis()))
                                 }
+                                ToolType.LASER -> {
+                                    liveLaserPoints = listOf(LaserPoint(Offset(rawX, rawY), System.currentTimeMillis()))
+                                }
                                 ToolType.LASSO -> {
-                                    liveLassoPoints = listOf(Offset(rawX, rawY))
+                                    val bounds = currentLassoBounds
+                                    if (currentHasLassoSelection && bounds != null && bounds.inflate(40f).contains(Offset(rawX, rawY))) {
+                                        isDraggingLassoSelection = true
+                                        lassoDragStartPoint = Offset(rawX, rawY)
+                                        liveLassoDragDelta = Offset.Zero
+                                    } else {
+                                        isDraggingLassoSelection = false
+                                        lassoDragStartPoint = null
+                                        liveLassoDragDelta = Offset.Zero
+                                        liveLassoPoints = listOf(Offset(rawX, rawY))
+                                    }
                                 }
                                 ToolType.ERASER -> {
                                     currentOnEraseAt(Offset(rawX, rawY), currentEraserWidth)
@@ -253,7 +303,18 @@ fun InkDrawingCanvas(
                             var dragX = currentPos.x * scaleX
                             var dragY = currentPos.y * scaleY
 
-                            if (currentRulerState.isVisible) {
+                            if (activeRulerEdge != GeometryEngine.RulerEdge.NONE) {
+                                val constrained = GeometryEngine.constrainToRulerEdge(
+                                    dragX, dragY,
+                                    activeRulerEdge,
+                                    currentRulerState.centerX, currentRulerState.centerY,
+                                    currentRulerState.angleDegrees,
+                                    rulerLength = 650f,
+                                    rulerThickness = 110f
+                                )
+                                dragX = constrained.first
+                                dragY = constrained.second
+                            } else if (currentRulerState.isVisible && (currentActiveTool == ToolType.PEN || currentActiveTool == ToolType.HIGHLIGHTER)) {
                                 val snapped = GeometryEngine.snapToRuler(
                                     dragX, dragY,
                                     currentRulerState.centerX, currentRulerState.centerY,
@@ -273,8 +334,17 @@ fun InkDrawingCanvas(
                                     val p = if (pressure > 0f) pressure else 1.0f
                                     liveStrokePoints = liveStrokePoints + StrokePoint(dragX, dragY, p, System.currentTimeMillis())
                                 }
+                                ToolType.LASER -> {
+                                    liveLaserPoints = liveLaserPoints + LaserPoint(Offset(dragX, dragY), System.currentTimeMillis())
+                                }
                                 ToolType.LASSO -> {
-                                    liveLassoPoints = liveLassoPoints + Offset(dragX, dragY)
+                                    if (isDraggingLassoSelection && lassoDragStartPoint != null) {
+                                        val dx = dragX - lassoDragStartPoint!!.x
+                                        val dy = dragY - lassoDragStartPoint!!.y
+                                        liveLassoDragDelta = Offset(dx, dy)
+                                    } else {
+                                        liveLassoPoints = liveLassoPoints + Offset(dragX, dragY)
+                                    }
                                 }
                                 ToolType.ERASER -> {
                                     currentOnEraseAt(Offset(dragX, dragY), currentEraserWidth)
@@ -291,6 +361,7 @@ fun InkDrawingCanvas(
                             }
                         },
                         onGestureEnd = { isStylus, wasDrag, lastPos ->
+                            activeRulerEdge = GeometryEngine.RulerEdge.NONE
                             val scaleX = pageWidth / size.width
                             val scaleY = pageHeight / size.height
                             val rawX = lastPos.x * scaleX
@@ -343,10 +414,21 @@ fun InkDrawingCanvas(
                                     liveStrokePoints = emptyList()
                                 }
                                 ToolType.LASSO -> {
-                                    if (liveLassoPoints.size > 2) {
-                                        currentOnLassoComplete?.invoke(liveLassoPoints)
+                                    if (isDraggingLassoSelection) {
+                                        val dx = liveLassoDragDelta.x
+                                        val dy = liveLassoDragDelta.y
+                                        if (abs(dx) > 1.5f || abs(dy) > 1.5f) {
+                                            currentOnMoveLasso?.invoke(dx, dy)
+                                        }
+                                        isDraggingLassoSelection = false
+                                        lassoDragStartPoint = null
+                                        liveLassoDragDelta = Offset.Zero
+                                    } else {
+                                        if (liveLassoPoints.size > 2) {
+                                            currentOnLassoComplete?.invoke(liveLassoPoints)
+                                        }
+                                        liveLassoPoints = emptyList()
                                     }
-                                    liveLassoPoints = emptyList()
                                 }
                                 ToolType.SHAPE -> {
                                     val start = shapeDragStart
@@ -396,33 +478,36 @@ fun InkDrawingCanvas(
                 drawBackgroundTemplate(page?.templateType ?: "BLANK", size.width, size.height, scaleFactor)
             }
 
-            // 2. Shapes
+            // 2. Shapes Layer (live shifted if selected and dragging)
             shapes.forEach { shape ->
-                if (isDraggingSelection && selectedShapeIds.contains(shape.id)) {
-                    withTransform({
-                        translate(dragDeltaPage.x * scaleFactor, dragDeltaPage.y * scaleFactor)
-                    }) {
-                        drawGeometricShape(shape, scaleFactor)
-                    }
+                val isSelected = lassoSelectedShapes.contains(shape)
+                val renderedShape = if (isSelected && liveLassoDragDelta != Offset.Zero) {
+                    shape.copy(
+                        startX = shape.startX + liveLassoDragDelta.x,
+                        startY = shape.startY + liveLassoDragDelta.y,
+                        endX = shape.endX + liveLassoDragDelta.x,
+                        endY = shape.endY + liveLassoDragDelta.y
+                    )
                 } else {
-                    drawGeometricShape(shape, scaleFactor)
+                    shape
                 }
+                drawGeometricShape(renderedShape, scaleFactor)
             }
 
-            // 3. Vector Strokes
+            // 3. Vector Strokes Layer (live shifted if selected and dragging)
             strokes.forEach { stroke ->
                 val isHighlightedByAudio = isPlayingAudio && stroke.audioTimestampMs != null &&
                         abs(playbackCurrentMs - stroke.audioTimestampMs) < 1500
 
-                if (isDraggingSelection && selectedStrokeIds.contains(stroke.id)) {
-                    withTransform({
-                        translate(dragDeltaPage.x * scaleFactor, dragDeltaPage.y * scaleFactor)
-                    }) {
-                        drawVectorStroke(stroke, scaleFactor, false)
-                    }
+                val isSelected = selectedStrokeIds.contains(stroke.id) || lassoSelectedStrokes.contains(stroke)
+                val renderedStroke = if (isSelected && liveLassoDragDelta != Offset.Zero) {
+                    stroke.copy(
+                        points = stroke.points.map { it.copy(x = it.x + liveLassoDragDelta.x, y = it.y + liveLassoDragDelta.y) }
+                    )
                 } else {
-                    drawVectorStroke(stroke, scaleFactor, isHighlightedByAudio)
+                    stroke
                 }
+                drawVectorStroke(renderedStroke, scaleFactor, isHighlightedByAudio)
             }
 
             // 4. Live Stroke in progress
@@ -452,11 +537,11 @@ fun InkDrawingCanvas(
                 )
             }
 
-            if (hasLassoSelection && lassoSelectionBounds != null && !isDraggingSelection) {
-                val b = lassoSelectionBounds
+            if (hasLassoSelection && lassoSelectionBounds != null) {
+                val b = if (liveLassoDragDelta != Offset.Zero) lassoSelectionBounds.translate(liveLassoDragDelta) else lassoSelectionBounds
                 val rect = Rect(b.left * scaleFactor, b.top * scaleFactor, b.right * scaleFactor, b.bottom * scaleFactor)
                 drawRect(
-                    color = Color(0x186366F1),
+                    color = Color(0x226366F1),
                     topLeft = Offset(rect.left, rect.top),
                     size = Size(rect.width, rect.height),
                     style = Fill
@@ -487,140 +572,99 @@ fun InkDrawingCanvas(
                 )
                 drawGeometricShape(previewShape, scaleFactor)
             }
-        }
 
-        // 2. Floating Lasso Quick Action Pill & Draggable Selection Box
-        if (hasLassoSelection && lassoSelectionBounds != null) {
-            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                val density = LocalDensity.current.density
-                val scaleX = maxWidth.value / pageWidth
-                val scaleY = maxHeight.value / pageHeight
-                val b = lassoSelectionBounds
+            // 7. Transient Laser Pointer Layer
+            if (liveLaserPoints.isNotEmpty()) {
+                val now = System.currentTimeMillis()
+                val maxAge = if (currentIsLaserTailEnabled) 750L else 220L
 
-                val effectiveLeft = b.left + dragDeltaPage.x
-                val effectiveTop = b.top + dragDeltaPage.y
-
-                val boxLeft = (effectiveLeft * scaleX).dp
-                val boxTop = (effectiveTop * scaleY).dp
-                val boxWidth = (b.width * scaleX).coerceAtLeast(44f).dp
-                val boxHeight = (b.height * scaleY).coerceAtLeast(44f).dp
-
-                // Draggable selection box overlay
-                Box(
-                    modifier = Modifier
-                        .offset(x = boxLeft, y = boxTop)
-                        .size(boxWidth, boxHeight)
-                        .border(2.dp, Color(0xFF4F46E5), RoundedCornerShape(8.dp))
-                        .background(Color(0x184F46E5), RoundedCornerShape(8.dp))
-                        .pointerInput(b) {
-                            detectDragGestures(
-                                onDragStart = {
-                                    isDraggingSelection = true
-                                    dragDeltaPage = Offset.Zero
-                                    onStartMoveLasso?.invoke()
-                                },
-                                onDrag = { change, dragAmount ->
-                                    change.consume()
-                                    val deltaPageX = (dragAmount.x / density) / scaleX
-                                    val deltaPageY = (dragAmount.y / density) / scaleY
-                                    dragDeltaPage += Offset(deltaPageX, deltaPageY)
-                                },
-                                onDragEnd = {
-                                    val totalX = dragDeltaPage.x
-                                    val totalY = dragDeltaPage.y
-                                    dragDeltaPage = Offset.Zero
-                                    isDraggingSelection = false
-                                    if (abs(totalX) > 0.5f || abs(totalY) > 0.5f) {
-                                        if (onCommitMoveLasso != null) {
-                                            onCommitMoveLasso(totalX, totalY)
-                                        } else {
-                                            onMoveLasso?.invoke(totalX, totalY)
-                                        }
-                                    }
-                                    onFinishMoveLasso?.invoke()
-                                },
-                                onDragCancel = {
-                                    dragDeltaPage = Offset.Zero
-                                    isDraggingSelection = false
-                                    onFinishMoveLasso?.invoke()
-                                }
-                            )
-                        }
-                ) {
-                    // Central Move icon indicator badge
-                    Surface(
-                        modifier = Modifier.align(Alignment.Center),
-                        shape = CircleShape,
-                        color = Color(0xEE4F46E5),
-                        shadowElevation = 4.dp
-                    ) {
-                        Box(modifier = Modifier.padding(6.dp)) {
-                            Icon(
-                                Icons.Default.OpenWith,
-                                contentDescription = "Drag to Move",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
+                if (currentIsLaserTailEnabled && liveLaserPoints.size >= 2) {
+                    for (i in 0 until liveLaserPoints.size - 1) {
+                        val p1 = liveLaserPoints[i]
+                        val p2 = liveLaserPoints[i + 1]
+                        val age = now - p2.timestamp
+                        if (age < maxAge) {
+                            val progress = 1f - (age.toFloat() / maxAge).coerceIn(0f, 1f)
+                            val alpha = progress * 0.85f
+                            val strokeW = (6.5f * scaleFactor * progress).coerceAtLeast(1.5f)
+                            drawLine(
+                                color = currentLaserColor.copy(alpha = alpha),
+                                start = Offset(p1.offset.x * scaleFactor, p1.offset.y * scaleFactor),
+                                end = Offset(p2.offset.x * scaleFactor, p2.offset.y * scaleFactor),
+                                strokeWidth = strokeW,
+                                cap = StrokeCap.Round
                             )
                         }
                     }
                 }
 
-                // Floating Action Bar above or below the selection (hidden while dragging)
-                if (!isDraggingSelection) {
-                    val pillX = (effectiveLeft * scaleX).coerceIn(8f, (maxWidth.value - 260f).coerceAtLeast(8f)).dp
-                    val pillY = if ((effectiveTop * scaleY) > 56f) {
-                        ((effectiveTop * scaleY) - 52f).dp
-                    } else {
-                        (((effectiveTop + b.height) * scaleY) + 8f).dp
-                    }
+                val head = liveLaserPoints.lastOrNull()
+                if (head != null) {
+                    val headPos = Offset(head.offset.x * scaleFactor, head.offset.y * scaleFactor)
+                    drawCircle(
+                        color = currentLaserColor.copy(alpha = 0.28f),
+                        radius = 16f * scaleFactor,
+                        center = headPos
+                    )
+                    drawCircle(
+                        color = currentLaserColor.copy(alpha = 0.70f),
+                        radius = 8.5f * scaleFactor,
+                        center = headPos
+                    )
+                    drawCircle(
+                        color = Color.White,
+                        radius = 3.5f * scaleFactor,
+                        center = headPos
+                    )
+                }
+            }
+        }
 
-                    Surface(
-                        modifier = Modifier
-                            .offset(x = pillX, y = pillY)
-                            .shadow(6.dp, RoundedCornerShape(20.dp)),
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 6.dp
+        // 2. Floating Lasso Quick Action Pill
+        if (hasLassoSelection && lassoSelectionBounds != null) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val scaleX = maxWidth.value / pageWidth
+                val scaleY = maxHeight.value / pageHeight
+                val b = if (liveLassoDragDelta != Offset.Zero) lassoSelectionBounds.translate(liveLassoDragDelta) else lassoSelectionBounds
+                val pillX = (b.left * scaleX).coerceIn(10f, maxWidth.value - 240f).dp
+                val pillY = ((b.top * scaleY) - 52f).coerceAtLeast(10f).dp
+
+                Surface(
+                    modifier = Modifier
+                        .offset(x = pillX, y = pillY)
+                        .shadow(6.dp, RoundedCornerShape(20.dp)),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 4.dp
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        Icon(
+                            Icons.Default.OpenWith,
+                            contentDescription = "Move selection",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Drag to move",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                        IconButton(
+                            onClick = { onDuplicateLasso?.invoke() },
+                            modifier = Modifier.size(32.dp)
                         ) {
-                            IconButton(
-                                onClick = { onDuplicateLasso?.invoke() },
-                                modifier = Modifier.size(34.dp)
-                            ) {
-                                Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(18.dp))
-                            }
-                            IconButton(
-                                onClick = { onDeleteLasso?.invoke() },
-                                modifier = Modifier.size(34.dp)
-                            ) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
-                            }
-                            if (onConvertLassoToText != null) {
-                                IconButton(
-                                    onClick = { onConvertLassoToText.invoke() },
-                                    modifier = Modifier.size(34.dp)
-                                ) {
-                                    Icon(Icons.Default.TextFields, contentDescription = "Convert to Text", tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp))
-                                }
-                            }
-                            if (onConvertLassoToMath != null) {
-                                IconButton(
-                                    onClick = { onConvertLassoToMath.invoke() },
-                                    modifier = Modifier.size(34.dp)
-                                ) {
-                                    Icon(Icons.Default.Calculate, contentDescription = "Convert to Math", tint = Color(0xFF0D9488), modifier = Modifier.size(18.dp))
-                                }
-                            }
-                            IconButton(
-                                onClick = { onClearLasso?.invoke() },
-                                modifier = Modifier.size(34.dp)
-                            ) {
-                                Icon(Icons.Default.Close, contentDescription = "Deselect", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
-                            }
+                            Icon(Icons.Default.ContentCopy, contentDescription = "Duplicate", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(18.dp))
+                        }
+                        IconButton(
+                            onClick = { onDeleteLasso?.invoke() },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
                         }
                     }
                 }
@@ -629,13 +673,16 @@ fun InkDrawingCanvas(
 
         // 3. Text Box Layer
         textItems.forEach { textItem ->
-            val isSelected = selectedTextIds.contains(textItem.id)
-            val dragOffset = if (isDraggingSelection && isSelected) dragDeltaPage else Offset.Zero
+            val isSelected = lassoSelectedTextItems.any { it.id == textItem.id }
+            val renderedItem = if (isSelected && liveLassoDragDelta != Offset.Zero) {
+                textItem.copy(x = textItem.x + liveLassoDragDelta.x, y = textItem.y + liveLassoDragDelta.y)
+            } else {
+                textItem
+            }
             CanvasTextBox(
-                textItem = textItem,
+                textItem = renderedItem,
                 pageWidth = pageWidth,
                 pageHeight = pageHeight,
-                dragOffset = dragOffset,
                 isPlayingAudio = isPlayingAudio,
                 playbackCurrentMs = playbackCurrentMs,
                 onUpdate = onUpdateTextItem,
@@ -646,8 +693,14 @@ fun InkDrawingCanvas(
 
         // 4. Media Items Layer
         mediaItems.forEach { mediaItem ->
+            val isSelected = lassoSelectedMediaItems.any { it.id == mediaItem.id }
+            val renderedMedia = if (isSelected && liveLassoDragDelta != Offset.Zero) {
+                mediaItem.copy(x = mediaItem.x + liveLassoDragDelta.x, y = mediaItem.y + liveLassoDragDelta.y)
+            } else {
+                mediaItem
+            }
             CanvasMediaBox(
-                mediaItem = mediaItem,
+                mediaItem = renderedMedia,
                 pageWidth = pageWidth,
                 pageHeight = pageHeight,
                 onUpdate = onUpdateMediaItem,
@@ -827,7 +880,6 @@ fun CanvasTextBox(
     textItem: CanvasTextItem,
     pageWidth: Float,
     pageHeight: Float,
-    dragOffset: Offset = Offset.Zero,
     isPlayingAudio: Boolean,
     playbackCurrentMs: Long,
     onUpdate: (CanvasTextItem) -> Unit,
@@ -845,10 +897,8 @@ fun CanvasTextBox(
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val scaleX = maxWidth.value / pageWidth
         val scaleY = maxHeight.value / pageHeight
-        val effectiveX = posX + dragOffset.x
-        val effectiveY = posY + dragOffset.y
-        val dpX = (effectiveX * scaleX).dp
-        val dpY = (effectiveY * scaleY).dp
+        val dpX = (posX * scaleX).dp
+        val dpY = (posY * scaleY).dp
         val dpW = (textItem.width * scaleX).dp
 
         Box(
