@@ -114,12 +114,14 @@ fun InkDrawingCanvas(
     var lassoDragStartPoint by remember { mutableStateOf<Offset?>(null) }
     var liveLassoDragDelta by remember { mutableStateOf(Offset.Zero) }
     var activeRulerEdge by remember { mutableStateOf(GeometryEngine.RulerEdge.NONE) }
+    var liveEraserPosition by remember { mutableStateOf<Offset?>(null) }
     val stylusInputState = sharedStylusInputState ?: remember { StylusInputState() }
 
     LaunchedEffect(activeTool, penColor, highlighterColor, activeShapeType, shapeStrokeColor, shapeFillColor) {
         liveStrokePoints = emptyList()
         liveLassoPoints = emptyList()
         liveLaserPoints = emptyList()
+        liveEraserPosition = null
         shapeDragStart = null
         shapeDragCurrent = null
         isDraggingLassoSelection = false
@@ -223,12 +225,7 @@ fun InkDrawingCanvas(
                     detectInkGesturesWithPalmRejection(
                         inputState = stylusInputState,
                         getPalmRejectionMode = { currentPalmRejectionMode },
-                        getAllowTouch = {
-                            currentActiveTool == ToolType.LASSO ||
-                            currentActiveTool == ToolType.TEXT ||
-                            currentActiveTool == ToolType.SHAPE ||
-                            currentActiveTool == ToolType.LASER
-                        },
+                        getAllowTouch = { false },
                         onGestureStart = { isStylus, pointerType, startPos, startPressure ->
                             val scaleX = pageWidth / size.width
                             val scaleY = pageHeight / size.height
@@ -288,7 +285,8 @@ fun InkDrawingCanvas(
                                     }
                                 }
                                 ToolType.ERASER -> {
-                                    currentOnEraseAt(Offset(rawX, rawY), currentEraserWidth)
+                                    liveEraserPosition = Offset(rawX, rawY)
+                                    currentOnEraseAt(Offset(rawX, rawY), currentEraserWidth / 2f)
                                 }
                                 ToolType.SHAPE -> {
                                     shapeDragStart = Offset(rawX, rawY)
@@ -347,7 +345,8 @@ fun InkDrawingCanvas(
                                     }
                                 }
                                 ToolType.ERASER -> {
-                                    currentOnEraseAt(Offset(dragX, dragY), currentEraserWidth)
+                                    liveEraserPosition = Offset(dragX, dragY)
+                                    currentOnEraseAt(Offset(dragX, dragY), currentEraserWidth / 2f)
                                 }
                                 ToolType.SHAPE -> {
                                     if (currentIsGridSnapEnabled) {
@@ -362,6 +361,7 @@ fun InkDrawingCanvas(
                         },
                         onGestureEnd = { isStylus, wasDrag, lastPos ->
                             activeRulerEdge = GeometryEngine.RulerEdge.NONE
+                            liveEraserPosition = null
                             val scaleX = pageWidth / size.width
                             val scaleY = pageHeight / size.height
                             val rawX = lastPos.x * scaleX
@@ -617,6 +617,33 @@ fun InkDrawingCanvas(
                         center = headPos
                     )
                 }
+            }
+
+            // 8. Real-time Eraser Visual Indicator (Exact Real Position & Chosen Diameter)
+            val eraserPos = liveEraserPosition
+            if (eraserPos != null && currentActiveTool == ToolType.ERASER) {
+                val centerPx = Offset(eraserPos.x * scaleFactor, eraserPos.y * scaleFactor)
+                val radiusPx = (currentEraserWidth / 2f) * scaleFactor
+
+                // Outer boundary stroke ring matching exact erase radius
+                drawCircle(
+                    color = Color(0xFF475569).copy(alpha = 0.85f),
+                    radius = radiusPx,
+                    center = centerPx,
+                    style = Stroke(width = (1.8f * scaleFactor).coerceAtLeast(1.2f))
+                )
+                // Inner semi-transparent fill showing erased area
+                drawCircle(
+                    color = Color(0xFF94A3B8).copy(alpha = 0.22f),
+                    radius = radiusPx,
+                    center = centerPx
+                )
+                // Center precision dot
+                drawCircle(
+                    color = Color(0xFF334155),
+                    radius = (2f * scaleFactor).coerceIn(1.5f, 3.5f),
+                    center = centerPx
+                )
             }
         }
 

@@ -27,8 +27,8 @@ object DownloadUtils {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // First attempt with sub-directory: Environment.DIRECTORY_DOWNLOADS + "/InkNote/"
-            val uri = trySaveToMediaStore(context, sourceFile, targetFileName, mimeType, Environment.DIRECTORY_DOWNLOADS + "/InkNote/")
+            // First attempt with sub-directory: Environment.DIRECTORY_DOWNLOADS + "/Inkstead/"
+            val uri = trySaveToMediaStore(context, sourceFile, targetFileName, mimeType, Environment.DIRECTORY_DOWNLOADS + "/Inkstead/")
                 ?: trySaveToMediaStore(context, sourceFile, targetFileName, mimeType, Environment.DIRECTORY_DOWNLOADS + "/")
             if (uri != null) {
                 return uri

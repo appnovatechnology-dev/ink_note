@@ -58,6 +58,8 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        fun getInstance(context: Context): AppDatabase = getDatabase(context)
+
         private class DatabaseCallback : Callback() {
             override fun onCreate(db: SupportSQLiteDatabase) {
                 super.onCreate(db)
@@ -68,6 +70,128 @@ abstract class AppDatabase : RoomDatabase() {
                     }
                 }
             }
+
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                super.onOpen(db)
+                try {
+                    db.execSQL("UPDATE notebooks SET title = 'Welcome to Inkstead ✍️' WHERE title LIKE '%Welcome to InkNote%'")
+                } catch (e: Exception) {
+                    android.util.Log.e("AppDatabase", "Error updating welcome title in onOpen", e)
+                }
+                INSTANCE?.let { database ->
+                    CoroutineScope(Dispatchers.IO).launch {
+                        updateWelcomeContentIfOld(database)
+                    }
+                }
+            }
+        }
+
+        suspend fun updateWelcomeContentIfOld(database: AppDatabase) {
+            try {
+                val notebooks = database.notebookDao().getAllNotebooksList()
+                val welcomeNotebook = notebooks.firstOrNull { 
+                    it.title.contains("Welcome", ignoreCase = true) 
+                } ?: return
+
+                if (welcomeNotebook.title != "Welcome to Inkstead ✍️") {
+                    database.notebookDao().updateNotebook(
+                        welcomeNotebook.copy(title = "Welcome to Inkstead ✍️")
+                    )
+                }
+
+                val pages = database.pageDao().getPagesListForNotebook(welcomeNotebook.id)
+                val page1 = pages.firstOrNull { it.pageNumber == 1 } ?: return
+                val textItems = database.textItemDao().getTextItemsListForPage(page1.id)
+                
+                val hasOldInkNote = textItems.any { it.text.contains("InkNote", ignoreCase = true) }
+                if (hasOldInkNote || textItems.isEmpty()) {
+                    for (item in textItems) {
+                        database.textItemDao().deleteTextItem(item)
+                    }
+                    val shapes = database.shapeDao().getShapesListForPage(page1.id)
+                    for (shape in shapes) {
+                        database.shapeDao().deleteShape(shape)
+                    }
+                    insertWelcomeContentForPage(database, page1.id)
+                }
+
+                val page2 = pages.firstOrNull { it.pageNumber == 2 }
+                if (page2 != null) {
+                    val page2Texts = database.textItemDao().getTextItemsListForPage(page2.id)
+                    if (page2Texts.isEmpty()) {
+                        insertPage2Content(database, page2.id)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("AppDatabase", "Error migrating welcome note content", e)
+            }
+        }
+
+        private suspend fun insertWelcomeContentForPage(database: AppDatabase, page1Id: Long) {
+            // Header card
+            database.textItemDao().insertTextItem(
+                TextItemEntity(
+                    pageId = page1Id,
+                    text = "Welcome to Inkstead! ✒️\n\nYour precision digital notebook for handwriting, technical drawing, and synchronized audio notes.",
+                    x = 50f,
+                    y = 60f,
+                    width = 700f,
+                    height = 100f,
+                    fontSize = 17f,
+                    fontColorArgb = 0xFF0F172AL,
+                    isBold = false,
+                    backgroundColorArgb = 0x184F46E5L
+                )
+            )
+
+            // Features & instructions guide
+            database.textItemDao().insertTextItem(
+                TextItemEntity(
+                    pageId = page1Id,
+                    text = "✨ Quick Start Guide:\n\n• 🖊️ Precision Stylus Inking: Ultra-low latency handwriting with bezier smoothing. Rest your hand freely by enabling 'Stylus Only' palm rejection in App Settings.\n\n• 📐 Interactive Geometry: Select Ruler, Protractor, or Compass from the top toolbar to draw straight lines, measured angles, and clean arcs. Freehand shapes snap automatically.\n\n• 🎙️ Synchronized Audio: Record lectures or meetings while taking notes. Tap any written note during playback to jump audio straight to that moment.\n\n• 📄 Multi-page PDF Markup: Import PDFs from the home screen for vector annotation, and export entire notebooks or custom page ranges (e.g. 1, 3-5).\n\n• 💡 Smart Gemini AI: Tap the AI button on the toolbar for Handwriting OCR, instant Math Formula solving, Flashcards, and Note Summaries.\n\n• 🔒 100% Private & Local: All notebooks, drawings, and voice recordings remain safely on this device.",
+                    x = 50f,
+                    y = 180f,
+                    width = 700f,
+                    height = 420f,
+                    fontSize = 14f,
+                    fontColorArgb = 0xFF1E293BL,
+                    isBold = false,
+                    backgroundColorArgb = 0x0C1E293BL
+                )
+            )
+
+            // Prompt to try page 2
+            database.textItemDao().insertTextItem(
+                TextItemEntity(
+                    pageId = page1Id,
+                    text = "👉 Tip: Use the pen or highlighter above to test your stylus, or swipe/tap to Page 2 to start writing on lined paper!",
+                    x = 50f,
+                    y = 620f,
+                    width = 700f,
+                    height = 70f,
+                    fontSize = 13.5f,
+                    fontColorArgb = 0xFF047857L,
+                    isBold = false,
+                    backgroundColorArgb = 0x1A10B981L
+                )
+            )
+        }
+
+        private suspend fun insertPage2Content(database: AppDatabase, page2Id: Long) {
+            database.textItemDao().insertTextItem(
+                TextItemEntity(
+                    pageId = page2Id,
+                    text = "📝 Practice & Notes\n\nPick a pen or highlighter from the toolbar above and start writing or sketching your first note here!",
+                    x = 50f,
+                    y = 60f,
+                    width = 700f,
+                    height = 80f,
+                    fontSize = 15f,
+                    fontColorArgb = 0xFF475569L,
+                    isBold = false,
+                    backgroundColorArgb = 0x106366F1L
+                )
+            )
         }
 
         private suspend fun populateInitialData(database: AppDatabase) {
@@ -84,7 +208,7 @@ abstract class AppDatabase : RoomDatabase() {
             val nbId = database.notebookDao().insertNotebook(
                 NotebookEntity(
                     subjectId = sub1Id,
-                    title = "Welcome to InkNote ✍️",
+                    title = "Welcome to Inkstead ✍️",
                     coverColorHex = "#6366F1",
                     isFavorite = true,
                     pageCount = 2
@@ -105,41 +229,12 @@ abstract class AppDatabase : RoomDatabase() {
                 PageEntity(
                     notebookId = nbId,
                     pageNumber = 2,
-                    templateType = "BLANK"
+                    templateType = "RULED"
                 )
             )
 
-            // Sample text box on page 1
-            database.textItemDao().insertTextItem(
-                TextItemEntity(
-                    pageId = page1Id,
-                    text = "Welcome to InkNote!\n\n• Smooth stylus & finger vector ink\n• Geometric tools: Ruler, Protractor, Compass & Shape snap\n• Synced Audio Recording & Scrubbing\n• PDF & Image Annotations\n• 100% Offline & Private",
-                    x = 80f,
-                    y = 120f,
-                    width = 650f,
-                    height = 220f,
-                    fontSize = 18f,
-                    fontColorArgb = 0xFF1E293BL,
-                    isBold = false,
-                    backgroundColorArgb = 0x156366F1L
-                )
-            )
-
-            // Sample welcome geometric shape on page 1
-            database.shapeDao().insertShape(
-                ShapeEntity(
-                    pageId = page1Id,
-                    shapeType = "RECTANGLE",
-                    startX = 60f,
-                    startY = 100f,
-                    endX = 760f,
-                    endY = 360f,
-                    strokeColorArgb = 0xFF6366F1L,
-                    fillColorArgb = 0x086366F1L,
-                    strokeWidth = 3f,
-                    isFilled = true
-                )
-            )
+            insertWelcomeContentForPage(database, page1Id)
+            insertPage2Content(database, page2Id)
         }
     }
 }

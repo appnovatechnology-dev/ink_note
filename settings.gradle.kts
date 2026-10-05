@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "InkNote"
+rootProject.name = "Inkstead"
 
 include(":app")

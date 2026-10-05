@@ -31,7 +31,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    InkNoteApp()
+                    InksteadApp()
                 }
             }
         }
@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun InkNoteApp() {
+fun InksteadApp() {
     val navController = rememberNavController()
     val homeViewModel: HomeViewModel = viewModel()
     val canvasViewModel: NoteCanvasViewModel = viewModel()

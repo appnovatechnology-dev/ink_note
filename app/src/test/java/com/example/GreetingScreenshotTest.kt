@@ -30,7 +30,7 @@ class GreetingScreenshotTest {
     composeTestRule.setContent {
       MyApplicationTheme {
         Box(modifier = Modifier.padding(16.dp)) {
-          Text("InkNote Studio", fontSize = 20.sp)
+          Text("Inkstead", fontSize = 20.sp)
         }
       }
     }

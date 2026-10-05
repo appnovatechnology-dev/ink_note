@@ -5,14 +5,14 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -20,15 +20,19 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.inknote.data.model.ToolType
 import com.example.inknote.ui.canvas.components.*
 import com.example.inknote.ui.settings.AppSettingsDialog
 import com.example.inknote.viewmodel.NoteCanvasViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -57,10 +61,15 @@ fun NoteCanvasScreen(
         }
     }
 
-    // Sync viewModel.currentPageIndex -> listState when changed externally (e.g. page jump or added new page)
+    // Sync viewModel.currentPageIndex -> listState when changed externally (instant cut for distant jumps!)
     LaunchedEffect(uiState.currentPageIndex) {
         if (uiState.currentPageIndex in 0 until pageCount && listState.firstVisibleItemIndex != uiState.currentPageIndex) {
-            listState.animateScrollToItem(uiState.currentPageIndex)
+            val diff = kotlin.math.abs(listState.firstVisibleItemIndex - uiState.currentPageIndex)
+            if (diff > 1) {
+                listState.scrollToItem(uiState.currentPageIndex) // Instant cut, no slow animation!
+            } else {
+                listState.animateScrollToItem(uiState.currentPageIndex)
+            }
         }
     }
 
@@ -84,63 +93,69 @@ fun NoteCanvasScreen(
 
     var showTemplateDialog by remember { mutableStateOf(false) }
     var showAudioListDialog by remember { mutableStateOf(false) }
+    var showAudioControls by remember { mutableStateOf(false) }
+    var showJumpToPageDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var previousPageBeforeJump by remember { mutableStateOf<Int?>(null) }
     var zoomScale by remember { mutableFloatStateOf(1.0f) }
     var isFitToScreen by remember { mutableStateOf(false) }
+    var isBottomBarVisible by remember { mutableStateOf(true) }
+    var lastBottomBarInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    // Auto-hide combined bottom bar after ~1.2s of inactivity
+    LaunchedEffect(lastBottomBarInteraction, isBottomBarVisible) {
+        if (isBottomBarVisible) {
+            delay(1200L)
+            isBottomBarVisible = false
+        }
+    }
+
+    // Auto-dismiss previous jump affordance after 8 seconds
+    LaunchedEffect(previousPageBeforeJump) {
+        if (previousPageBeforeJump != null) {
+            delay(8000L)
+            previousPageBeforeJump = null
+        }
+    }
+
+    // Bring bottom bar back smoothly when user scrolls
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) {
+            isBottomBarVisible = true
+            lastBottomBarInteraction = System.currentTimeMillis()
+        }
+    }
 
     Scaffold(
         topBar = {
-            Column {
-                CanvasTopAppBar(
-                    notebookTitle = uiState.notebook?.title ?: "Note",
-                    canUndo = uiState.canUndo,
-                    canRedo = uiState.canRedo,
-                    isLocked = uiState.notebook?.isLocked == true,
-                    isSpeakingNotes = uiState.isSpeakingTts,
-                    onBack = {
-                        viewModel.saveCurrentPageImmediately()
-                        onNavigateBack()
-                    },
-                    onUndo = { viewModel.undo() },
-                    onRedo = { viewModel.redo() },
-                    onExport = { viewModel.showExportDialog(true) },
-                    onOpenAudioList = { showAudioListDialog = true },
-                    onOpenStudyHub = { viewModel.openFlashcardsModal() },
-                    onOpenSummary = { viewModel.openSummaryModal() },
-                    onOpenSnapshots = { viewModel.openSnapshotsModal() },
-                    onOpenSecurity = { viewModel.openSecurityModal() },
-                    onManualSave = { viewModel.manualSaveNote() },
-                    onSpeakNotes = { viewModel.speakCurrentNotes() },
-                    onStopSpeakingNotes = { viewModel.stopSpeakingNotes() },
-                    onOpenSettings = { viewModel.setShowSettingsDialog(true) }
-                )
-
-                // Top Audio Bar (Record & Scrubbing controls)
-                AudioRecordingBar(
-                    isRecording = uiState.isRecordingAudio,
-                    recordingElapsedMs = uiState.recordingElapsedMs,
-                    isPlaying = uiState.isPlayingAudio,
-                    playbackCurrentMs = uiState.playbackCurrentMs,
-                    playbackTotalMs = uiState.playbackTotalMs,
-                    playbackSpeed = uiState.playbackSpeed,
-                    recordingsCount = uiState.recordings.size,
-                    onStartRecording = {
-                        val hasMic = ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.RECORD_AUDIO
-                        ) == PackageManager.PERMISSION_GRANTED
-                        if (hasMic) {
-                            viewModel.startAudioRecording()
-                        } else {
-                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        }
-                    },
-                    onStopRecording = { viewModel.stopAudioRecording() },
-                    onTogglePlay = { viewModel.toggleAudioPlayback() },
-                    onSeek = { viewModel.seekAudio(it) },
-                    onSetSpeed = { viewModel.setPlaybackSpeed(it) },
-                    onOpenRecordings = { showAudioListDialog = true }
-                )
-            }
+            CanvasTopAppBar(
+                notebookTitle = uiState.notebook?.title ?: "Note",
+                canUndo = uiState.canUndo,
+                canRedo = uiState.canRedo,
+                isLocked = uiState.notebook?.isLocked == true,
+                isSpeakingNotes = uiState.isSpeakingTts,
+                isRecordingAudio = uiState.isRecordingAudio,
+                isPlayingAudio = uiState.isPlayingAudio,
+                isAudioControlsOpen = showAudioControls,
+                onBack = {
+                    viewModel.saveCurrentPageImmediately()
+                    onNavigateBack()
+                },
+                onUndo = { viewModel.undo() },
+                onRedo = { viewModel.redo() },
+                onExport = { viewModel.showExportDialog(true) },
+                onToggleAudioControls = { showAudioControls = !showAudioControls },
+                onOpenAudioList = { showAudioListDialog = true },
+                onRenameTitle = { showRenameDialog = true },
+                onOpenStudyHub = { viewModel.openFlashcardsModal() },
+                onOpenSummary = { viewModel.openSummaryModal() },
+                onOpenSnapshots = { viewModel.openSnapshotsModal() },
+                onOpenSecurity = { viewModel.openSecurityModal() },
+                onManualSave = { viewModel.manualSaveNote() },
+                onSpeakNotes = { viewModel.speakCurrentNotes() },
+                onStopSpeakingNotes = { viewModel.stopSpeakingNotes() },
+                onOpenSettings = { viewModel.setShowSettingsDialog(true) }
+            )
         }
     ) { paddingValues ->
         Box(
@@ -257,13 +272,53 @@ fun NoteCanvasScreen(
                 onClose = { viewModel.toggleCompass() }
             )
 
-            // Dockable Toolbar at the Top-Center
+            // Floating Audio Recording & Playback Overlay
+            AnimatedVisibility(
+                visible = showAudioControls || uiState.isRecordingAudio || uiState.isPlayingAudio,
+                enter = fadeIn() + slideInVertically { -it },
+                exit = fadeOut() + slideOutVertically { -it },
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 6.dp, start = 8.dp, end = 8.dp)
+                    .zIndex(15f)
+            ) {
+                AudioRecordingBar(
+                    isRecording = uiState.isRecordingAudio,
+                    recordingElapsedMs = uiState.recordingElapsedMs,
+                    isPlaying = uiState.isPlayingAudio,
+                    playbackCurrentMs = uiState.playbackCurrentMs,
+                    playbackTotalMs = uiState.playbackTotalMs,
+                    playbackSpeed = uiState.playbackSpeed,
+                    recordingsCount = uiState.recordings.size,
+                    onStartRecording = {
+                        val hasMic = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (hasMic) {
+                            viewModel.startAudioRecording()
+                        } else {
+                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
+                    onStopRecording = { viewModel.stopAudioRecording() },
+                    onTogglePlay = { viewModel.toggleAudioPlayback() },
+                    onSeek = { viewModel.seekAudio(it) },
+                    onSetSpeed = { viewModel.setPlaybackSpeed(it) },
+                    onOpenRecordings = { showAudioListDialog = true },
+                    onClose = { showAudioControls = false }
+                )
+            }
+
+            // Dockable Toolbar Floating Over the Canvas
             DockableToolbar(
                 activeTool = uiState.activeTool,
+                activeShapeType = uiState.activeShapeType,
                 penColor = uiState.penColor,
                 penWidth = uiState.penWidth,
                 highlighterColor = uiState.highlighterColor,
                 highlighterWidth = uiState.highlighterWidth,
+                eraserWidth = uiState.eraserWidth,
                 laserColor = uiState.laserColor,
                 isLaserTailEnabled = uiState.isLaserTailEnabled,
                 isMagicInkEnabled = uiState.isMagicInkEnabled,
@@ -275,6 +330,8 @@ fun NoteCanvasScreen(
                 onSetPenColor = { viewModel.setPenColor(it) },
                 onSetPenWidth = { viewModel.setPenWidth(it) },
                 onSetHighlighterColor = { viewModel.setHighlighterColor(it) },
+                onSetHighlighterWidth = { viewModel.setHighlighterWidth(it) },
+                onSetEraserWidth = { viewModel.setEraserWidth(it) },
                 onSetLaserColor = { viewModel.setLaserColor(it) },
                 onToggleLaserTail = { viewModel.toggleLaserTail() },
                 onToggleMagicInk = { viewModel.toggleMagicInk() },
@@ -287,40 +344,134 @@ fun NoteCanvasScreen(
                 onPickImage = { imagePickerLauncher.launch("image/*") },
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 4.dp)
+                    .padding(top = if (showAudioControls || uiState.isRecordingAudio || uiState.isPlayingAudio) 66.dp else 6.dp)
+                    .zIndex(10f)
             )
 
-            // Bottom Floating Controls: Page Navigator & Zoom Controls Bar
-            Row(
+            // Optional hop-back button if a jump was performed
+            if (previousPageBeforeJump != null) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 58.dp)
+                        .zIndex(14f),
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color(0xFF1E293B),
+                    shadowElevation = 6.dp
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Page ${uiState.currentPageIndex + 1}",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        TextButton(
+                            onClick = {
+                                val target = previousPageBeforeJump!!
+                                previousPageBeforeJump = null
+                                coroutineScope.launch {
+                                    listState.scrollToItem(target)
+                                    viewModel.setCurrentPageIndex(target)
+                                }
+                                isBottomBarVisible = true
+                                lastBottomBarInteraction = System.currentTimeMillis()
+                            },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "Return to Page ${previousPageBeforeJump!! + 1}",
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
+                        IconButton(
+                            onClick = { previousPageBeforeJump = null },
+                            modifier = Modifier.size(20.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Dismiss",
+                                tint = Color.LightGray,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Bottom tap-to-reveal affordance when bar is hidden
+            if (!isBottomBarVisible) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(32.dp)
+                        .clickable {
+                            isBottomBarVisible = true
+                            lastBottomBarInteraction = System.currentTimeMillis()
+                        },
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(bottom = 4.dp)
+                            .width(44.dp)
+                            .height(4.dp)
+                            .background(Color.Gray.copy(alpha = 0.35f), RoundedCornerShape(2.dp))
+                    )
+                }
+            }
+
+            // Slim Combined Bottom Bar (Page Navigator & Zoom Controls with Auto-Hide)
+            AnimatedVisibility(
+                visible = isBottomBarVisible,
+                enter = fadeIn() + slideInVertically { it / 2 },
+                exit = fadeOut() + slideOutVertically { it / 2 },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 12.dp, start = 12.dp, end = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(bottom = 8.dp)
+                    .zIndex(12f)
             ) {
-                PageNavigatorBar(
+                CombinedBottomBar(
                     currentPage = uiState.currentPageIndex,
                     totalPages = pageCount,
-                    onAddPage = { viewModel.addNewPage() },
-                    onChangeTemplate = { showTemplateDialog = true }
-                )
-
-                ZoomControlsBar(
                     zoomScale = zoomScale,
                     isFitToScreen = isFitToScreen,
+                    onJumpToPage = {
+                        lastBottomBarInteraction = System.currentTimeMillis()
+                        showJumpToPageDialog = true
+                    },
+                    onAddPage = {
+                        lastBottomBarInteraction = System.currentTimeMillis()
+                        viewModel.addNewPage()
+                    },
+                    onChangeTemplate = {
+                        lastBottomBarInteraction = System.currentTimeMillis()
+                        showTemplateDialog = true
+                    },
                     onZoomIn = {
+                        lastBottomBarInteraction = System.currentTimeMillis()
                         isFitToScreen = false
                         zoomScale = (zoomScale + 0.15f).coerceAtMost(4.0f)
                     },
                     onZoomOut = {
+                        lastBottomBarInteraction = System.currentTimeMillis()
                         isFitToScreen = false
                         zoomScale = (zoomScale - 0.15f).coerceAtLeast(0.5f)
                     },
                     onResetZoom = {
+                        lastBottomBarInteraction = System.currentTimeMillis()
                         isFitToScreen = false
                         zoomScale = 1.0f
                     },
                     onToggleFitToScreen = {
+                        lastBottomBarInteraction = System.currentTimeMillis()
                         isFitToScreen = !isFitToScreen
                         if (isFitToScreen) {
                             zoomScale = 1.0f
@@ -334,7 +485,8 @@ fun NoteCanvasScreen(
                 Surface(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .padding(top = 58.dp),
+                        .padding(top = 58.dp)
+                        .zIndex(18f),
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
                     color = Color(0xFF1E293B),
                     shadowElevation = 6.dp
@@ -498,6 +650,35 @@ fun NoteCanvasScreen(
             currentPalmMode = uiState.palmRejectionMode,
             onSetPalmMode = { viewModel.setPalmRejectionMode(it) },
             onDismiss = { viewModel.setShowSettingsDialog(false) }
+        )
+    }
+
+    if (showJumpToPageDialog) {
+        JumpToPageDialog(
+            currentPage = uiState.currentPageIndex,
+            totalPages = pageCount,
+            onJump = { targetIndex ->
+                val prev = uiState.currentPageIndex
+                previousPageBeforeJump = prev
+                coroutineScope.launch {
+                    listState.scrollToItem(targetIndex)
+                    viewModel.setCurrentPageIndex(targetIndex)
+                }
+                isBottomBarVisible = true
+                lastBottomBarInteraction = System.currentTimeMillis()
+            },
+            onDismiss = { showJumpToPageDialog = false }
+        )
+    }
+
+    if (showRenameDialog) {
+        RenameNoteDialog(
+            currentTitle = uiState.notebook?.title ?: "Note",
+            onRename = { newTitle ->
+                viewModel.renameNotebook(newTitle)
+                showRenameDialog = false
+            },
+            onDismiss = { showRenameDialog = false }
         )
     }
 }

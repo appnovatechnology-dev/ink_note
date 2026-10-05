@@ -56,7 +56,7 @@ class AiSmartToolsEngine(private val context: Context) {
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    private fun isOnline(): Boolean {
+    fun isOnline(): Boolean {
         return try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
             val network = cm?.activeNetwork ?: return false
@@ -171,38 +171,48 @@ class AiSmartToolsEngine(private val context: Context) {
     }
 
     /**
-     * Generates study flashcards from notebook content.
+     * Generates study flashcards from notebook content (images of handwriting/diagrams + typed text).
      */
     suspend fun generateFlashcards(
         notebookId: Long,
         notebookTitle: String,
-        notesContent: String
+        pageImages: List<String> = emptyList(),
+        notesContent: String = ""
     ): List<FlashcardEntity> = withContext(Dispatchers.IO) {
         val trimmed = notesContent.trim()
-        if (trimmed.isBlank() || trimmed.length < 5) {
-            // Throw descriptive exception so ViewModel and UI can report it directly
-            throw IllegalArgumentException("Couldn't read content from this document — please add notes or text before generating flashcards.")
+        if (pageImages.isEmpty() && trimmed.length < 5) {
+            throw IllegalArgumentException("Couldn't read content from this document — please add handwriting or text before generating flashcards.")
         }
 
-        if (isCloudAvailable) {
-            try {
-                val prompt = """
-                    You are a specialized study flashcard generator. You MUST generate flashcards ONLY from the following document notes.
-                    Do not invent outside topics. Extract key terms, facts, questions, and concepts strictly from the text provided.
-                    
-                    Notebook: $notebookTitle
-                    Notes Content:
-                    $trimmed
-                    
-                    Return a JSON array of 3 to 6 objects with keys:
-                    "front": Clear question or key term from the notes,
-                    "back": Accurate answer, definition, or explanation from the notes,
-                    "category": Short topic or category name from the notes.
-                    Return ONLY the raw JSON array.
-                """.trimIndent()
+        if (!isOnline()) {
+            throw IllegalStateException("AI features require an active internet connection. Please check your network and try again.")
+        }
 
-                val jsonResponse = callGeminiApi(prompt)
-                val clean = jsonResponse.substringAfter("[").substringBeforeLast("]")
+        if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
+            throw IllegalStateException("Gemini API key is not configured. Please add your API key in Settings.")
+        }
+
+        try {
+            val prompt = buildString {
+                append("You are a specialized study flashcard generator reading a user's digital notebook titled \"$notebookTitle\". ")
+                append("The notebook contains handwritten ink notes, diagrams, mathematical formulas, and/or typed text. ")
+                append("Read and understand everything across the provided page image(s) and any notes:\n")
+                if (trimmed.isNotBlank()) {
+                    append("Typed Notes:\n$trimmed\n\n")
+                }
+                append("You MUST generate study flashcards based STRICTLY on what is written or diagrammed in this notebook. Do not invent outside topics. ")
+                append("Extract key terms, definitions, formulas, facts, and concepts directly from the user's handwriting and text.\n")
+                append("If the content is blank, illegible, or lacks educational facts to form flashcards, return an empty array [].\n")
+                append("Otherwise, return a JSON array of 3 to 6 objects with keys:\n")
+                append("\"front\": Clear question or key term from the notes,\n")
+                append("\"back\": Accurate answer, definition, or explanation from the notes,\n")
+                append("\"category\": Short topic or category name from the notes.\n")
+                append("Return ONLY raw JSON array without markdown formatting.")
+            }
+
+            val jsonResponse = callGeminiMultimodalApi(prompt, pageImages)
+            val clean = jsonResponse.substringAfter("[").substringBeforeLast("]")
+            if (clean.isNotBlank()) {
                 val array = JSONArray("[$clean]")
                 val list = mutableListOf<FlashcardEntity>()
                 for (i in 0 until array.length()) {
@@ -217,45 +227,58 @@ class AiSmartToolsEngine(private val context: Context) {
                     )
                 }
                 if (list.isNotEmpty()) return@withContext list
-            } catch (e: Exception) {
-                Log.w("AiSmartToolsEngine", "Gemini flashcard generation failed, extracting from local text", e)
             }
+        } catch (e: Exception) {
+            if (e is IllegalStateException) throw e
+            Log.w("AiSmartToolsEngine", "Gemini flashcard generation failed", e)
+            throw IllegalArgumentException("Couldn't read enough content from this note to generate flashcards — try a clearer page.")
         }
 
-        // Context-aware extraction from actual user text
-        extractFlashcardsFromText(notebookId, notebookTitle, trimmed)
+        throw IllegalArgumentException("Couldn't read enough content from this note to generate flashcards — try a clearer page.")
     }
 
     /**
-     * Generates an interactive quiz from notebook content.
+     * Generates an interactive quiz from notebook content (images of handwriting/diagrams + typed text).
      */
     suspend fun generateQuiz(
         notebookTitle: String,
-        notesContent: String
+        pageImages: List<String> = emptyList(),
+        notesContent: String = ""
     ): List<QuizQuestion> = withContext(Dispatchers.IO) {
         val trimmed = notesContent.trim()
-        if (trimmed.isBlank() || trimmed.length < 5) {
-            throw IllegalArgumentException("Couldn't read content from this document — please add notes or text before generating a quiz.")
+        if (pageImages.isEmpty() && trimmed.length < 5) {
+            throw IllegalArgumentException("Couldn't read content from this document — please add handwriting or text before generating a quiz.")
         }
 
-        if (isCloudAvailable) {
-            try {
-                val prompt = """
-                    Create 3 multiple choice quiz questions based STRICTLY on the following document notes:
-                    Notebook: $notebookTitle
-                    Notes:
-                    $trimmed
-                    
-                    Return a JSON array of objects with keys:
-                    "question": String,
-                    "options": Array of 4 Strings (one correct, three plausible distractors from the notes),
-                    "correctIndex": Int (0 to 3),
-                    "explanation": String
-                    Return ONLY raw JSON array.
-                """.trimIndent()
+        if (!isOnline()) {
+            throw IllegalStateException("AI features require an active internet connection. Please check your network and try again.")
+        }
 
-                val jsonResponse = callGeminiApi(prompt)
-                val clean = jsonResponse.substringAfter("[").substringBeforeLast("]")
+        if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
+            throw IllegalStateException("Gemini API key is not configured. Please add your API key in Settings.")
+        }
+
+        try {
+            val prompt = buildString {
+                append("You are an interactive study quiz generator reading a user's digital notebook titled \"$notebookTitle\". ")
+                append("The notebook contains handwritten ink notes, diagrams, mathematical formulas, and/or typed text. ")
+                append("Read and understand everything across the provided page image(s) and any notes:\n")
+                if (trimmed.isNotBlank()) {
+                    append("Typed Notes:\n$trimmed\n\n")
+                }
+                append("Create 3 multiple choice quiz questions based STRICTLY on what is written and diagrammed in the notebook. ")
+                append("If the content is blank, illegible, or lacks educational facts, return an empty array [].\n")
+                append("Otherwise, return a JSON array of 3 objects with keys:\n")
+                append("\"question\": String,\n")
+                append("\"options\": Array of 4 Strings (one correct answer, three plausible distractors from the notes),\n")
+                append("\"correctIndex\": Int (0 to 3),\n")
+                append("\"explanation\": String citing the note content.\n")
+                append("Return ONLY raw JSON array without markdown formatting.")
+            }
+
+            val jsonResponse = callGeminiMultimodalApi(prompt, pageImages)
+            val clean = jsonResponse.substringAfter("[").substringBeforeLast("]")
+            if (clean.isNotBlank()) {
                 val array = JSONArray("[$clean]")
                 val list = mutableListOf<QuizQuestion>()
                 for (i in 0 until array.length()) {
@@ -274,40 +297,59 @@ class AiSmartToolsEngine(private val context: Context) {
                     )
                 }
                 if (list.isNotEmpty()) return@withContext list
-            } catch (e: Exception) {
-                Log.w("AiSmartToolsEngine", "Gemini quiz generation failed", e)
             }
+        } catch (e: Exception) {
+            if (e is IllegalStateException) throw e
+            Log.w("AiSmartToolsEngine", "Gemini quiz generation failed", e)
+            throw IllegalArgumentException("Couldn't read enough content from this note to generate a quiz — try a clearer page.")
         }
 
-        extractQuizFromText(notebookTitle, trimmed)
+        throw IllegalArgumentException("Couldn't read enough content from this note to generate a quiz — try a clearer page.")
     }
 
     /**
-     * Summarizes notebook content and extracts key concepts & action items.
+     * Summarizes notebook content (images of handwriting/diagrams + typed text) and extracts key concepts & action items.
      */
     suspend fun summarizeNotes(
         notebookTitle: String,
-        notesContent: String
+        pageImages: List<String> = emptyList(),
+        notesContent: String = ""
     ): NoteSummaryResult = withContext(Dispatchers.IO) {
-        if (isCloudAvailable && notesContent.isNotBlank()) {
-            try {
-                val prompt = """
-                    Summarize the following notebook notes for "$notebookTitle".
-                    Notes content:
-                    $notesContent
-                    
-                    Return a JSON object with:
-                    "title": String (executive summary heading),
-                    "summary": String (clear 2-3 sentence overview),
-                    "keyPoints": Array of 3-5 key bullet point Strings,
-                    "actionItems": Array of 2-4 actionable next steps Strings.
-                    Return ONLY JSON.
-                """.trimIndent()
+        val trimmed = notesContent.trim()
+        if (pageImages.isEmpty() && trimmed.isBlank()) {
+            throw IllegalArgumentException("Couldn't read content from this document — please add handwriting or text before generating a summary.")
+        }
 
-                val jsonResponse = callGeminiApi(prompt)
-                val clean = jsonResponse.substringAfter("{").substringBeforeLast("}")
+        if (!isOnline()) {
+            throw IllegalStateException("AI Summary requires an active internet connection. Please check your network and try again.")
+        }
+
+        if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
+            throw IllegalStateException("Gemini API key is not configured. Please add your API key in Settings.")
+        }
+
+        try {
+            val prompt = buildString {
+                append("You are an executive assistant reading a user's digital notebook titled \"$notebookTitle\". ")
+                append("The notebook contains handwritten ink notes, sketches, diagrams, formulas, and/or typed text. ")
+                append("Read and understand everything across the provided page image(s) and any notes:\n")
+                if (trimmed.isNotBlank()) {
+                    append("Typed Notes:\n$trimmed\n\n")
+                }
+                append("Analyze the handwritten content, diagrams, and text carefully. ")
+                append("Then provide a comprehensive summary and structured insights based strictly on its actual content.\n")
+                append("Return a JSON object with keys:\n")
+                append("\"title\": String (summary heading),\n")
+                append("\"summary\": String (clear 2-4 sentence overview of the handwritten and typed content),\n")
+                append("\"keyPoints\": Array of 3-5 bullet point Strings extracting key concepts,\n")
+                append("\"actionItems\": Array of 2-4 actionable next steps.\n")
+                append("Return ONLY raw JSON object without markdown formatting.")
+            }
+
+            val jsonResponse = callGeminiMultimodalApi(prompt, pageImages)
+            val clean = jsonResponse.substringAfter("{").substringBeforeLast("}")
+            if (clean.isNotBlank()) {
                 val json = JSONObject("{$clean}")
-
                 val keyPoints = mutableListOf<String>()
                 val kpArr = json.optJSONArray("keyPoints")
                 if (kpArr != null) {
@@ -322,35 +364,47 @@ class AiSmartToolsEngine(private val context: Context) {
 
                 return@withContext NoteSummaryResult(
                     title = json.optString("title", "Summary: $notebookTitle"),
-                    summary = json.optString("summary", "Notes cover key concepts and structured information."),
-                    keyPoints = keyPoints.ifEmpty { listOf("Reviewed core definitions and diagrams", "Captured key lecture formulas") },
-                    actionItems = actionItems.ifEmpty { listOf("Review flashcards for retention", "Practice related problem sets") },
+                    summary = json.optString("summary", "Notes synthesized from handwritten entries, diagrams, and text."),
+                    keyPoints = keyPoints.ifEmpty { listOf("Captured core handwritten concepts and diagrams", "Reviewed structured notes") },
+                    actionItems = actionItems.ifEmpty { listOf("Review flashcards for retention", "Practice related concepts") },
                     isCloudAi = true
                 )
-            } catch (e: Exception) {
-                Log.w("AiSmartToolsEngine", "Gemini summarization failed", e)
             }
+        } catch (e: Exception) {
+            if (e is IllegalStateException) throw e
+            Log.w("AiSmartToolsEngine", "Gemini summarization failed", e)
+            throw IllegalArgumentException("Couldn't read enough content from this note to generate a summary — try a clearer page.")
         }
 
-        // Local Summary Engine
-        NoteSummaryResult(
-            title = "Summary of $notebookTitle",
-            summary = if (notesContent.isNotBlank()) {
-                "Comprehensive notes synthesized from handwritten entries, diagrams, and lecture recordings in this notebook."
-            } else {
-                "Digital notebook containing sketches, ink formulas, and voice annotations."
-            },
-            keyPoints = listOf(
-                "Core subject principles and visual diagrams recorded across pages",
-                "Synchronized audio markers tagged to relevant handwritten notes",
-                "Key formulas, definitions, and geometric proofs organized chronologically"
-            ),
-            actionItems = listOf(
-                "Run Flashcard review mode for active recall testing",
-                "Export annotated PDF notes for group study and sharing"
-            ),
-            isCloudAi = false
-        )
+        throw IllegalArgumentException("Couldn't read enough content from this note to generate a summary — try a clearer page.")
+    }
+
+    /**
+     * Transcribes handwritten notes from page images into plain, natural text for reading aloud via TTS.
+     */
+    suspend fun transcribeNotesForTts(
+        notebookTitle: String,
+        pageImages: List<String> = emptyList(),
+        notesContent: String = ""
+    ): String = withContext(Dispatchers.IO) {
+        if (!isOnline()) {
+            throw IllegalStateException("Reading handwritten notes aloud requires an internet connection for initial AI transcription. Please connect to the internet or type text.")
+        }
+
+        if (apiKey.isBlank() || apiKey == "MY_GEMINI_API_KEY") {
+            throw IllegalStateException("Gemini API key is not configured. Please add your API key in Settings.")
+        }
+
+        val prompt = buildString {
+            append("Transcribe the readable handwritten notes, diagrams, and content on the provided notebook page image(s) for \"$notebookTitle\" into plain text, preserving the natural reading order. ")
+            if (notesContent.isNotBlank()) {
+                append("\nExisting typed text:\n$notesContent\n")
+            }
+            append("\nOutput ONLY the transcribed plain text suitable for reading aloud via Text-to-Speech (TTS), without introductory remarks, conversational commentary, or markdown symbols.")
+        }
+
+        val text = callGeminiMultimodalApi(prompt, pageImages)
+        text.trim().replace("`", "").replace("*", "")
     }
 
     /**
@@ -424,6 +478,62 @@ class AiSmartToolsEngine(private val context: Context) {
                 val parts = content.getJSONArray("parts")
                 if (parts.length() > 0) {
                     return parts.getJSONObject(0).getString("text")
+                }
+            }
+        }
+        return ""
+    }
+
+    private fun callGeminiMultimodalApi(
+        prompt: String,
+        imagesBase64: List<String> = emptyList()
+    ): String {
+        val model = "gemini-3.5-flash"
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+
+        val partsArray = JSONArray()
+        partsArray.put(JSONObject().apply {
+            put("text", prompt)
+        })
+
+        for (img in imagesBase64) {
+            if (img.isNotBlank()) {
+                partsArray.put(JSONObject().apply {
+                    put("inlineData", JSONObject().apply {
+                        put("mimeType", "image/jpeg")
+                        put("data", img)
+                    })
+                })
+            }
+        }
+
+        val jsonBody = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("parts", partsArray)
+                })
+            })
+        }
+
+        val request = Request.Builder()
+            .url(url)
+            .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                throw Exception("HTTP ${response.code}: ${response.message} $errBody")
+            }
+            val responseBody = response.body?.string() ?: ""
+            val root = JSONObject(responseBody)
+            val candidates = root.optJSONArray("candidates")
+            if (candidates != null && candidates.length() > 0) {
+                val candidate = candidates.getJSONObject(0)
+                val content = candidate.optJSONObject("content")
+                val parts = content?.optJSONArray("parts")
+                if (parts != null && parts.length() > 0) {
+                    return parts.getJSONObject(0).optString("text", "")
                 }
             }
         }

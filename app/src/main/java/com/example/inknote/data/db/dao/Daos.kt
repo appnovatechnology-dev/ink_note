@@ -27,6 +27,9 @@ interface NotebookDao {
     @Query("SELECT * FROM notebooks WHERE isArchived = 0 ORDER BY updatedAt DESC")
     fun getAllNotebooks(): Flow<List<NotebookEntity>>
 
+    @Query("SELECT * FROM notebooks WHERE isArchived = 0 ORDER BY updatedAt DESC")
+    suspend fun getAllNotebooksList(): List<NotebookEntity>
+
     @Query("SELECT * FROM notebooks WHERE subjectId = :subjectId AND isArchived = 0 ORDER BY updatedAt DESC")
     fun getNotebooksBySubject(subjectId: Long): Flow<List<NotebookEntity>>
 

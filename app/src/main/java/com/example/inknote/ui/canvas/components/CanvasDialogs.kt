@@ -14,6 +14,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
 import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -23,6 +25,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.inknote.data.db.entities.AudioRecordingEntity
@@ -834,3 +838,148 @@ fun AudioRecordingsListDialog(
         )
     }
 }
+
+@Composable
+fun JumpToPageDialog(
+    currentPage: Int,
+    totalPages: Int,
+    onJump: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var pageInput by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    fun submit() {
+        val parsed = pageInput.trim().toIntOrNull()
+        if (parsed == null) {
+            errorMessage = "Please enter a valid page number"
+        } else if (parsed <= 0) {
+            errorMessage = "Page number must be at least 1"
+        } else if (parsed > totalPages) {
+            errorMessage = "This notebook only has $totalPages pages"
+        } else {
+            onJump(parsed - 1)
+            onDismiss()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.FindInPage, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("Jump to Page", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Current: Page ${currentPage + 1} of $totalPages",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = pageInput,
+                    onValueChange = {
+                        pageInput = it
+                        errorMessage = null
+                    },
+                    label = { Text("Page Number (1 to $totalPages)") },
+                    placeholder = { Text("e.g. 550") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Go
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onGo = { submit() }
+                    ),
+                    isError = errorMessage != null,
+                    supportingText = {
+                        if (errorMessage != null) {
+                            Text(errorMessage!!, color = MaterialTheme.colorScheme.error)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { submit() }) {
+                Text("Go")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun RenameNoteDialog(
+    currentTitle: String,
+    onRename: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var titleInput by remember { mutableStateOf(currentTitle) }
+    var isError by remember { mutableStateOf(false) }
+
+    fun submit() {
+        val trimmed = titleInput.trim()
+        if (trimmed.isEmpty()) {
+            isError = true
+        } else {
+            onRename(trimmed)
+            onDismiss()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("Rename Note", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = titleInput,
+                    onValueChange = {
+                        titleInput = it
+                        isError = false
+                    },
+                    label = { Text("Note Title") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = { submit() }
+                    ),
+                    isError = isError,
+                    supportingText = {
+                        if (isError) {
+                            Text("Title cannot be empty", color = MaterialTheme.colorScheme.error)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { submit() }) {
+                Text("Rename")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+

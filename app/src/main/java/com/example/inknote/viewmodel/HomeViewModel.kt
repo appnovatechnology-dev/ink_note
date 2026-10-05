@@ -4,6 +4,7 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.inknote.data.db.AppDatabase
 import com.example.inknote.data.db.entities.NotebookEntity
 import com.example.inknote.data.db.entities.SubjectEntity
 import com.example.inknote.data.repository.NoteRepository
@@ -52,6 +53,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadData()
+        migrateWelcomeNoteIfNeeded()
+    }
+
+    private fun migrateWelcomeNoteIfNeeded() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val context = getApplication<Application>()
+            val db = AppDatabase.getInstance(context)
+            AppDatabase.updateWelcomeContentIfOld(db)
+        }
     }
 
     private fun loadData() {

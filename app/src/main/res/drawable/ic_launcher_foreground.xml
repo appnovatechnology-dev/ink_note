@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/app_icon_inknote_1786962028722"
+        android:drawable="@drawable/inkstead_logo_mark_1790172297033"
         android:gravity="center" />
 </layer-list>

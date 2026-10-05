@@ -62,21 +62,22 @@ class StylusInputState(
         // Stylus and Eraser pointers are always accepted for drawing
         if (pointerType == PointerType.Stylus || pointerType == PointerType.Eraser) return false
 
-        // If tool explicitly allows touch (e.g. Lasso, Text, Shape, Laser)
+        // If tool explicitly allows touch
         if (allowTouch) return false
 
         // OFF mode: Both fingers and stylus can produce ink
         if (mode == PalmRejectionMode.OFF) return false
 
         // STYLUS_ONLY mode:
-        // When in Stylus Only mode and a stylus is connected/active, finger and palm touches NEVER draw ink.
-        // If no stylus has ever been active/connected, we allow touch so touch-only devices are usable.
+        // When in Stylus Only mode, finger and palm touches NEVER perform tool actions
+        // (drawing, lasso selection/move, shape drawing, laser pointing, erasing).
+        // This leaves fingers dedicated for scrolling, pinch-zoom, and UI interaction without accidental edits.
         if (mode == PalmRejectionMode.STYLUS_ONLY) {
-            return hasActiveStylus
+            return true
         }
 
         // AUTO mode: Reject finger/palm touch if stylus is active or was recently detected
-        return isStylusRecentlyActive()
+        return isStylusRecentlyActive() || hasActiveStylus
     }
 
     fun reset() {

@@ -47,7 +47,7 @@ private val LightColorScheme = lightColorScheme(
 @Composable
 fun MyApplicationTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = false, // Use our handcrafted InkNote palette for consistent brand feel
+    dynamicColor: Boolean = false, // Use our handcrafted Inkstead palette for consistent brand feel
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {

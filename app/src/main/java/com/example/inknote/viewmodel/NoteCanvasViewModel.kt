@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -353,6 +354,17 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
             return state.pages.getOrNull(state.currentPageIndex)
         }
 
+    fun renameNotebook(newTitle: String) {
+        val nb = _uiState.value.notebook ?: return
+        val trimmed = newTitle.trim()
+        if (trimmed.isEmpty() || trimmed == nb.title) return
+        viewModelScope.launch {
+            val updated = nb.copy(title = trimmed, updatedAt = System.currentTimeMillis())
+            repository.updateNotebook(updated)
+            _uiState.update { it.copy(notebook = updated) }
+        }
+    }
+
     fun setCurrentPageIndex(index: Int) {
         val pages = _uiState.value.pages
         if (index in pages.indices && index != _uiState.value.currentPageIndex) {
@@ -589,15 +601,35 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         val currentShapes = currentData.shapes
 
         val remainingStrokes = currentStrokes.filterNot { stroke ->
-            stroke.points.any { p ->
-                hypot((p.x - point.x).toDouble(), (p.y - point.y).toDouble()) < (radius + stroke.strokeWidth / 2f)
+            if (stroke.points.isEmpty()) return@filterNot false
+            if (stroke.points.size == 1) {
+                val p = stroke.points[0]
+                hypot((p.x - point.x).toDouble(), (p.y - point.y).toDouble()) <= (radius + stroke.strokeWidth / 2f)
+            } else {
+                for (i in 0 until stroke.points.size - 1) {
+                    val p1 = stroke.points[i]
+                    val p2 = stroke.points[i + 1]
+                    val dx = p2.x - p1.x
+                    val dy = p2.y - p1.y
+                    val lenSq = dx * dx + dy * dy
+                    val dist = if (lenSq == 0f) {
+                        hypot((point.x - p1.x).toDouble(), (point.y - p1.y).toDouble()).toFloat()
+                    } else {
+                        val t = (((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lenSq).coerceIn(0f, 1f)
+                        val projX = p1.x + t * dx
+                        val projY = p1.y + t * dy
+                        hypot((point.x - projX).toDouble(), (point.y - projY).toDouble()).toFloat()
+                    }
+                    if (dist <= (radius + stroke.strokeWidth / 2f)) return@filterNot true
+                }
+                false
             }
         }
 
         val remainingShapes = currentShapes.filterNot { shape ->
             val cx = shape.centerX
             val cy = shape.centerY
-            hypot((cx - point.x).toDouble(), (cy - point.y).toDouble()) < (radius + shape.width / 2f)
+            hypot((cx - point.x).toDouble(), (cy - point.y).toDouble()) <= (radius + shape.width / 2f)
         }
 
         if (remainingStrokes.size != currentStrokes.size || remainingShapes.size != currentShapes.size) {
@@ -1104,20 +1136,90 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update { it.copy(showFlashcardsModal = false, aiErrorMessage = null) }
     }
 
+    private val ttsTranscriptionCache = mutableMapOf<Long, String>()
+
+    data class NoteMultimodalPayload(
+        val pageImages: List<String>,
+        val typedText: String,
+        val hasInkOrDrawings: Boolean
+    )
+
+    private suspend fun gatherNotebookMultimodalPayload(): NoteMultimodalPayload = withContext(Dispatchers.IO) {
+        saveAllPendingChangesImmediately()
+        val nbId = currentNotebookId
+        val allPages = repository.getPagesList(nbId)
+        val pageImages = mutableListOf<String>()
+        val textBuilder = StringBuilder()
+        var hasInkOrDrawings = false
+
+        for (page in allPages) {
+            val cached = _uiState.value.pagesData[page.id]
+            val strokes = cached?.strokes ?: repository.getStrokesListForExport(page.id)
+            val shapes = cached?.shapes ?: repository.getShapesListForExport(page.id)
+            val textItems = cached?.textItems ?: repository.getTextListForExport(page.id)
+            val mediaItems = cached?.mediaItems ?: repository.getMediaListForExport(page.id)
+
+            for (ti in textItems) {
+                val t = ti.text.trim()
+                if (t.isNotBlank() && t != "Type here...") {
+                    textBuilder.append(t).append("\n")
+                }
+            }
+
+            if (strokes.isNotEmpty() || shapes.isNotEmpty()) {
+                hasInkOrDrawings = true
+            }
+
+            val isPopulated = PageImageRenderer.isPagePopulated(page, strokes, shapes, textItems, mediaItems)
+            if (isPopulated && pageImages.size < 8) {
+                try {
+                    val base64Img = PageImageRenderer.renderPageToBase64Jpeg(
+                        page = page,
+                        strokes = strokes,
+                        shapes = shapes,
+                        textItems = textItems,
+                        mediaItems = mediaItems
+                    )
+                    pageImages.add(base64Img)
+                } catch (e: Exception) {
+                    Log.w("NoteCanvasViewModel", "Failed to render page ${page.id} to image", e)
+                }
+            }
+        }
+
+        // Include any audio recording titles/topics
+        _uiState.value.recordings.forEach { rec ->
+            if (rec.title.isNotBlank()) {
+                textBuilder.append("Voice Note: ").append(rec.title).append("\n")
+            }
+        }
+
+        NoteMultimodalPayload(
+            pageImages = pageImages,
+            typedText = textBuilder.toString().trim(),
+            hasInkOrDrawings = hasInkOrDrawings
+        )
+    }
+
     fun generateFlashcardsWithAi() {
         val nb = _uiState.value.notebook ?: return
         viewModelScope.launch {
             _uiState.update { it.copy(isAiProcessing = true, aiErrorMessage = null) }
             try {
-                val noteContent = buildNotebookContentString()
-                val newCards = aiSmartEngine.generateFlashcards(nb.id, nb.title, noteContent)
+                val payload = gatherNotebookMultimodalPayload()
+                val newCards = aiSmartEngine.generateFlashcards(
+                    notebookId = nb.id,
+                    notebookTitle = nb.title,
+                    pageImages = payload.pageImages,
+                    notesContent = payload.typedText
+                )
                 repository.insertFlashcards(newCards)
                 _uiState.update { it.copy(isAiProcessing = false, flashcards = newCards, aiErrorMessage = null) }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
                         isAiProcessing = false,
-                        aiErrorMessage = e.message ?: "Couldn't read content from this document — please add notes or text before generating flashcards."
+                        aiErrorMessage = e.message ?: "Couldn't read content from this document — please add handwriting or notes before generating flashcards."
                     )
                 }
             }
@@ -1137,14 +1239,18 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             _uiState.update { it.copy(isAiProcessing = true, aiErrorMessage = null) }
             try {
-                val noteContent = buildNotebookContentString()
-                val questions = aiSmartEngine.generateQuiz(nb.title, noteContent)
+                val payload = gatherNotebookMultimodalPayload()
+                val questions = aiSmartEngine.generateQuiz(
+                    notebookTitle = nb.title,
+                    pageImages = payload.pageImages,
+                    notesContent = payload.typedText
+                )
                 _uiState.update { it.copy(isAiProcessing = false, quizQuestions = questions, aiErrorMessage = null) }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
                         isAiProcessing = false,
-                        aiErrorMessage = e.message ?: "Couldn't read content from this document — please add notes or text before generating a quiz."
+                        aiErrorMessage = e.message ?: "Couldn't read content from this document — please add handwriting or notes before generating a quiz."
                     )
                 }
             }
@@ -1165,8 +1271,12 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             _uiState.update { it.copy(isAiProcessing = true, aiErrorMessage = null) }
             try {
-                val noteContent = buildNotebookContentString()
-                val summary = aiSmartEngine.summarizeNotes(nb.title, noteContent)
+                val payload = gatherNotebookMultimodalPayload()
+                val summary = aiSmartEngine.summarizeNotes(
+                    notebookTitle = nb.title,
+                    pageImages = payload.pageImages,
+                    notesContent = payload.typedText
+                )
                 _uiState.update { it.copy(isAiProcessing = false, noteSummary = summary, aiErrorMessage = null) }
             } catch (e: Exception) {
                 _uiState.update {
@@ -1662,13 +1772,61 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun speakCurrentNotes() {
+        val nb = _uiState.value.notebook ?: return
         viewModelScope.launch {
-            val content = buildNotebookContentString()
-            if (content.isNotBlank()) {
-                ttsManager.speak(content)
-            } else {
-                _uiState.update { it.copy(saveNotificationMessage = "No text content to read aloud") }
+            val payload = gatherNotebookMultimodalPayload()
+
+            if (payload.hasInkOrDrawings) {
+                // Check memory cache first for instant playback
+                val cached = ttsTranscriptionCache[nb.id]
+                if (!cached.isNullOrBlank()) {
+                    _uiState.update { it.copy(saveNotificationMessage = "Reading note aloud (from cached transcription)") }
+                    ttsManager.speak(cached)
+                    delay(2500)
+                    _uiState.update { it.copy(saveNotificationMessage = null) }
+                    return@launch
+                }
+
+                // Initial transcription of handwritten ink requires online connectivity
+                if (!aiSmartEngine.isOnline()) {
+                    _uiState.update {
+                        it.copy(saveNotificationMessage = "Reading handwritten notes aloud requires an internet connection for initial AI transcription.")
+                    }
+                    delay(3500)
+                    _uiState.update { it.copy(saveNotificationMessage = null) }
+                    return@launch
+                }
+
+                _uiState.update { it.copy(saveNotificationMessage = "Transcribing handwritten notes with AI...") }
+                try {
+                    val transcribed = aiSmartEngine.transcribeNotesForTts(
+                        notebookTitle = nb.title,
+                        pageImages = payload.pageImages,
+                        notesContent = payload.typedText
+                    )
+                    if (transcribed.isNotBlank()) {
+                        ttsTranscriptionCache[nb.id] = transcribed
+                        ttsManager.speak(transcribed)
+                        _uiState.update { it.copy(saveNotificationMessage = "Reading note aloud") }
+                    } else {
+                        _uiState.update { it.copy(saveNotificationMessage = "Couldn't read handwritten text to speak aloud") }
+                    }
+                } catch (e: Exception) {
+                    _uiState.update {
+                        it.copy(saveNotificationMessage = e.message ?: "Failed to transcribe notes for reading aloud")
+                    }
+                }
+                delay(3000)
+                _uiState.update { it.copy(saveNotificationMessage = null) }
+            } else if (payload.typedText.isNotBlank()) {
+                // Purely typed text note — works completely offline via on-device TTS engine
+                ttsManager.speak(payload.typedText)
+                _uiState.update { it.copy(saveNotificationMessage = "Reading note aloud") }
                 delay(2000)
+                _uiState.update { it.copy(saveNotificationMessage = null) }
+            } else {
+                _uiState.update { it.copy(saveNotificationMessage = "No content to read aloud — write or type notes first") }
+                delay(2500)
                 _uiState.update { it.copy(saveNotificationMessage = null) }
             }
         }

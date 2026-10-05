@@ -1,7 +1,6 @@
 {
-  "name": "InkNote",
-  "description": "Offline-first Notability-style digital notebook with handwriting canvas, synced audio recording, geometric tools, and PDF annotation.",
+  "name": "Inkstead",
+  "description": "Offline-first precision digital notebook for stylus handwriting, synchronized audio recording, geometric tools, and vector PDF annotation.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
-
