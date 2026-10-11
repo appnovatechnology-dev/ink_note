@@ -12,16 +12,31 @@ enum class ToolType {
     TEXT,
     SHAPE,
     RULER,
-    PROTRACTOR,
-    COMPASS,
     MEDIA,
     HAND
+}
+
+enum class EraserMode {
+    STROKE,
+    AREA;
+
+    companion object {
+        val WHOLE_STROKE = STROKE
+        val PARTIAL = AREA
+        val PARTIAL_PRECISION = AREA
+    }
 }
 
 enum class PalmRejectionMode {
     STYLUS_ONLY,
     AUTO,
     OFF
+}
+
+enum class ThemeMode {
+    LIGHT,
+    DARK,
+    SYSTEM
 }
 
 enum class TemplateType {
@@ -32,7 +47,17 @@ enum class TemplateType {
     GRID_LARGE,
     DOTTED,
     CORNELL,
-    MUSIC
+    ISOMETRIC,
+    MUSIC,
+    HABIT_TRACKER,
+    DAILY_GOALS,
+    WEEKLY_PLANNER,
+    DAILY_PLANNER,
+    GOAL_SETTING,
+    ASSIGNMENT_PLANNER,
+    MIND_MAP,
+    SEMESTER_OVERVIEW,
+    MONTHLY_PLANNER
 }
 
 enum class ShapeType {
@@ -55,32 +80,34 @@ data class StrokePoint(
 )
 
 data class VectorStroke(
-    val id: Long = 0,
+    val id: Long = System.currentTimeMillis(),
     val pageId: Long = 0,
     val toolType: ToolType = ToolType.PEN,
-    val color: Color = Color(0xFF1E293B),
-    val strokeWidth: Float = 3.5f,
+    val color: Color = Color.Black,
+    val strokeWidth: Float = 4f,
     val alpha: Float = 1.0f,
     val points: List<StrokePoint> = emptyList(),
     val audioTimestampMs: Long? = null,
     val isGeometricSnap: Boolean = false,
     val isSelected: Boolean = false
 ) {
+    val colorArgb: Int get() = color.toArgb()
+
     fun toSerializedPoints(): String {
         return points.joinToString(";") { "${it.x},${it.y},${it.pressure},${it.timestamp}" }
     }
 
     companion object {
-        fun parseSerializedPoints(data: String): List<StrokePoint> {
-            if (data.isBlank()) return emptyList()
-            return data.split(";").mapNotNull { part ->
-                val tokens = part.split(",")
-                if (tokens.size >= 2) {
-                    val x = tokens[0].toFloatOrNull() ?: return@mapNotNull null
-                    val y = tokens[1].toFloatOrNull() ?: return@mapNotNull null
-                    val pressure = tokens.getOrNull(2)?.toFloatOrNull() ?: 1.0f
-                    val timestamp = tokens.getOrNull(3)?.toLongOrNull() ?: 0L
-                    StrokePoint(x, y, pressure, timestamp)
+        fun parseSerializedPoints(serialized: String): List<StrokePoint> {
+            if (serialized.isBlank()) return emptyList()
+            return serialized.split(";").mapNotNull { token ->
+                val parts = token.split(",")
+                if (parts.size >= 2) {
+                    val x = parts[0].toFloatOrNull() ?: return@mapNotNull null
+                    val y = parts[1].toFloatOrNull() ?: return@mapNotNull null
+                    val p = if (parts.size >= 3) parts[2].toFloatOrNull() ?: 1.0f else 1.0f
+                    val ts = if (parts.size >= 4) parts[3].toLongOrNull() ?: 0L else 0L
+                    StrokePoint(x, y, p, ts)
                 } else null
             }
         }
@@ -88,22 +115,25 @@ data class VectorStroke(
 }
 
 data class GeometricShape(
-    val id: Long = 0,
+    val id: Long = System.currentTimeMillis(),
     val pageId: Long = 0,
     val shapeType: ShapeType = ShapeType.RECTANGLE,
     val startX: Float = 0f,
     val startY: Float = 0f,
     val endX: Float = 100f,
     val endY: Float = 100f,
-    val strokeColor: Color = Color(0xFF1E293B),
+    val strokeColor: Color = Color.Black,
     val fillColor: Color = Color.Transparent,
-    val strokeWidth: Float = 3.5f,
+    val strokeWidth: Float = 3f,
     val rotationDegrees: Float = 0f,
     val isFilled: Boolean = false,
     val sideCount: Int = 5,
     val audioTimestampMs: Long? = null,
     val isSelected: Boolean = false
 ) {
+    val strokeColorArgb: Int get() = strokeColor.toArgb()
+    val fillColorArgb: Int get() = fillColor.toArgb()
+
     val width: Float get() = kotlin.math.abs(endX - startX)
     val height: Float get() = kotlin.math.abs(endY - startY)
     val left: Float get() = kotlin.math.min(startX, endX)
@@ -113,7 +143,7 @@ data class GeometricShape(
 }
 
 data class CanvasTextItem(
-    val id: Long = 0,
+    val id: Long = System.currentTimeMillis(),
     val pageId: Long = 0,
     val text: String = "",
     val x: Float = 50f,
@@ -121,7 +151,7 @@ data class CanvasTextItem(
     val width: Float = 220f,
     val height: Float = 80f,
     val fontSize: Float = 16f,
-    val fontColor: Color = Color(0xFF1E293B),
+    val fontColor: Color = Color.Black,
     val isBold: Boolean = false,
     val isItalic: Boolean = false,
     val backgroundColor: Color = Color.Transparent,
@@ -131,10 +161,14 @@ data class CanvasTextItem(
     val isMathFormula: Boolean = false,
     val linkNotebookId: Long? = null,
     val linkNotebookTitle: String? = null
-)
+) {
+    val colorArgb: Int get() = fontColor.toArgb()
+}
+
+typealias TextItem = CanvasTextItem
 
 data class CanvasMediaItem(
-    val id: Long = 0,
+    val id: Long = System.currentTimeMillis(),
     val pageId: Long = 0,
     val localUri: String = "",
     val x: Float = 50f,
@@ -146,6 +180,8 @@ data class CanvasMediaItem(
     val isSelected: Boolean = false
 )
 
+typealias MediaItem = CanvasMediaItem
+
 data class RulerState(
     val isVisible: Boolean = false,
     val centerX: Float = 400f,
@@ -153,22 +189,4 @@ data class RulerState(
     val length: Float = 450f,
     val width: Float = 70f,
     val angleDegrees: Float = 0f
-)
-
-data class ProtractorState(
-    val isVisible: Boolean = false,
-    val centerX: Float = 400f,
-    val centerY: Float = 600f,
-    val radius: Float = 180f,
-    val rotationDegrees: Float = 0f,
-    val currentSweepAngle: Float = 0f
-)
-
-data class CompassState(
-    val isVisible: Boolean = false,
-    val pivotX: Float = 400f,
-    val pivotY: Float = 600f,
-    val radius: Float = 120f,
-    val currentAngleDegrees: Float = 0f,
-    val isDrawingArc: Boolean = false
 )

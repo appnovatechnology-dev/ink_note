@@ -58,7 +58,17 @@ fun PageTemplateDialog(
                     Triple("GRID_LARGE", "Large Grid", Icons.Default.Grid4x4),
                     Triple("DOTTED", "Dotted Bullet Journal", Icons.Default.MoreHoriz),
                     Triple("CORNELL", "Cornell Notes Template", Icons.Default.DashboardCustomize),
-                    Triple("MUSIC", "Music Staves", Icons.Default.MusicNote)
+                    Triple("ISOMETRIC", "Isometric Grid (3D)", Icons.Default.Details),
+                    Triple("MUSIC", "Music Staves", Icons.Default.MusicNote),
+                    Triple("HABIT_TRACKER", "Habit Tracker (Radial)", Icons.Default.TrackChanges),
+                    Triple("DAILY_GOALS", "Daily Goals & Priorities", Icons.Default.CheckCircle),
+                    Triple("WEEKLY_PLANNER", "Weekly Planner", Icons.Default.DateRange),
+                    Triple("DAILY_PLANNER", "Daily Planner & Schedule", Icons.Default.Schedule),
+                    Triple("GOAL_SETTING", "Goal Setting & Milestones", Icons.Default.Flag),
+                    Triple("ASSIGNMENT_PLANNER", "Assignment Planner", Icons.Default.Assignment),
+                    Triple("MIND_MAP", "Mind Map (Branching)", Icons.Default.AccountTree),
+                    Triple("SEMESTER_OVERVIEW", "Semester Overview", Icons.Default.CalendarMonth),
+                    Triple("MONTHLY_PLANNER", "Monthly Planner Calendar", Icons.Default.CalendarToday)
                 )
 
                 LazyColumn(modifier = Modifier.height(240.dp)) {
@@ -271,7 +281,7 @@ fun ExportDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    "Export all handwriting, drawings, geometric shapes, and annotations into a vector PDF. Works 100% offline.",
+                    "Export all handwriting, drawings, geometric shapes, and annotations into a vector PDF. Works offline without internet.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

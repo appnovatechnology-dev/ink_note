@@ -38,7 +38,8 @@ data class HomeUiState(
     val showNewNotebookDialog: Boolean = false,
     val showNewSubjectDialog: Boolean = false,
     val selectedNotebookForMenu: NotebookEntity? = null,
-    val searchResultsTextCount: Int = 0
+    val searchResultsTextCount: Int = 0,
+    val pdfImportProgress: String? = null
 )
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
@@ -193,9 +194,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importPdf(uri: Uri, onComplete: (Long) -> Unit) {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
-            val fileName = uri.lastPathSegment?.substringAfterLast('/') ?: "Imported Document"
-            val cleanTitle = fileName.removeSuffix(".pdf")
+            _uiState.update { it.copy(isLoading = true, pdfImportProgress = "Preparing PDF...") }
+            val fileName = PdfManager.getFileNameFromUri(getApplication(), uri)
+            val cleanTitle = fileName.removeSuffix(".pdf").removeSuffix(".PDF").ifBlank { "Imported Document" }
 
             val notebookId = repository.createNotebook(
                 title = cleanTitle,
@@ -208,18 +209,174 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             val defaultPages = repository.getPagesList(notebookId)
             defaultPages.forEach { repository.deletePage(it) }
 
-            val importedCount = withContext(Dispatchers.IO) {
-                PdfManager.importPdfToNotebook(
-                    context = getApplication(),
-                    pdfUri = uri,
-                    notebookId = notebookId,
-                    repository = repository
-                )
+            val localUri = withContext(Dispatchers.IO) {
+                PdfManager.copyUriToTempFile(getApplication(), uri)
             }
 
-            _uiState.update { it.copy(isLoading = false) }
-            if (importedCount > 0) {
-                onComplete(notebookId)
+            var hasNavigated = false
+            viewModelScope.launch(Dispatchers.IO) {
+                PdfManager.importPdfToNotebook(
+                    context = getApplication(),
+                    pdfUri = localUri,
+                    notebookId = notebookId,
+                    repository = repository,
+                    onFirstPageReady = {
+                        if (!hasNavigated) {
+                            hasNavigated = true
+                            withContext(Dispatchers.Main) {
+                                _uiState.update { it.copy(isLoading = false) }
+                                onComplete(notebookId)
+                            }
+                        }
+                    },
+                    onProgress = { current, total ->
+                        _uiState.update { it.copy(pdfImportProgress = "Importing page $current of $total") }
+                    }
+                )
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(isLoading = false, pdfImportProgress = null) }
+                    if (!hasNavigated) {
+                        hasNavigated = true
+                        onComplete(notebookId)
+                    }
+                }
+            }
+        }
+    }
+
+    fun appendPdfToNotebook(uri: Uri, notebookId: Long, onComplete: (Long) -> Unit) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, pdfImportProgress = "Preparing PDF...") }
+            val localUri = withContext(Dispatchers.IO) {
+                PdfManager.copyUriToTempFile(getApplication(), uri)
+            }
+            var hasNavigated = false
+            viewModelScope.launch(Dispatchers.IO) {
+                PdfManager.importPdfToNotebook(
+                    context = getApplication(),
+                    pdfUri = localUri,
+                    notebookId = notebookId,
+                    repository = repository,
+                    isAppending = true,
+                    onFirstPageReady = {
+                        if (!hasNavigated) {
+                            hasNavigated = true
+                            withContext(Dispatchers.Main) {
+                                _uiState.update { it.copy(isLoading = false) }
+                                onComplete(notebookId)
+                            }
+                        }
+                    },
+                    onProgress = { current, total ->
+                        _uiState.update { it.copy(pdfImportProgress = "Appending page $current of $total") }
+                    }
+                )
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(isLoading = false, pdfImportProgress = null) }
+                    if (!hasNavigated) {
+                        hasNavigated = true
+                        onComplete(notebookId)
+                    }
+                }
+            }
+        }
+    }
+
+    fun importSharedPdfs(uris: List<Uri>, title: String, subjectId: Long?, onComplete: (Long) -> Unit) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, pdfImportProgress = "Preparing PDF...") }
+            val cleanTitle = title.ifBlank { "Shared Document" }
+
+            val notebookId = repository.createNotebook(
+                title = cleanTitle,
+                subjectId = subjectId,
+                coverColorHex = "#6366F1",
+                templateType = "BLANK"
+            )
+
+            // Remove default blank initial page so PDF pages fill in
+            val defaultPages = repository.getPagesList(notebookId)
+            defaultPages.forEach { repository.deletePage(it) }
+
+            val localUris = withContext(Dispatchers.IO) {
+                uris.map { PdfManager.copyUriToTempFile(getApplication(), it) }
+            }
+
+            var hasNavigated = false
+            viewModelScope.launch(Dispatchers.IO) {
+                localUris.forEachIndexed { index, localUri ->
+                    PdfManager.importPdfToNotebook(
+                        context = getApplication(),
+                        pdfUri = localUri,
+                        notebookId = notebookId,
+                        repository = repository,
+                        isAppending = index > 0,
+                        onFirstPageReady = {
+                            if (!hasNavigated) {
+                                hasNavigated = true
+                                withContext(Dispatchers.Main) {
+                                    _uiState.update { it.copy(isLoading = false) }
+                                    onComplete(notebookId)
+                                }
+                            }
+                        },
+                        onProgress = { current, total ->
+                            val prefix = if (localUris.size > 1) "File ${index + 1}/${localUris.size}: " else ""
+                            _uiState.update { it.copy(pdfImportProgress = "${prefix}Importing page $current of $total") }
+                        }
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(isLoading = false, pdfImportProgress = null) }
+                    if (!hasNavigated) {
+                        hasNavigated = true
+                        onComplete(notebookId)
+                    }
+                }
+            }
+        }
+    }
+
+    fun appendSharedPdfs(uris: List<Uri>, notebookId: Long, onComplete: (Long) -> Unit) {
+        if (uris.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, pdfImportProgress = "Preparing PDF...") }
+            val localUris = withContext(Dispatchers.IO) {
+                uris.map { PdfManager.copyUriToTempFile(getApplication(), it) }
+            }
+
+            var hasNavigated = false
+            viewModelScope.launch(Dispatchers.IO) {
+                localUris.forEachIndexed { index, localUri ->
+                    PdfManager.importPdfToNotebook(
+                        context = getApplication(),
+                        pdfUri = localUri,
+                        notebookId = notebookId,
+                        repository = repository,
+                        isAppending = true,
+                        onFirstPageReady = {
+                            if (!hasNavigated) {
+                                hasNavigated = true
+                                withContext(Dispatchers.Main) {
+                                    _uiState.update { it.copy(isLoading = false) }
+                                    onComplete(notebookId)
+                                }
+                            }
+                        },
+                        onProgress = { current, total ->
+                            val prefix = if (localUris.size > 1) "File ${index + 1}/${localUris.size}: " else ""
+                            _uiState.update { it.copy(pdfImportProgress = "${prefix}Appending page $current of $total") }
+                        }
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(isLoading = false, pdfImportProgress = null) }
+                    if (!hasNavigated) {
+                        hasNavigated = true
+                        onComplete(notebookId)
+                    }
+                }
             }
         }
     }

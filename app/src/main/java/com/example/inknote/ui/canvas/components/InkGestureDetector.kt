@@ -8,6 +8,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
+import kotlin.math.abs
 import kotlin.math.hypot
 
 import com.example.inknote.data.model.PalmRejectionMode
@@ -98,12 +99,16 @@ suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
     inputState: StylusInputState,
     getPalmRejectionMode: () -> PalmRejectionMode,
     getAllowTouch: () -> Boolean,
+    getIsZoomedIn: () -> Boolean = { false },
     onGestureStart: (isStylus: Boolean, pointerType: PointerType, startPosition: Offset, pressure: Float) -> Unit,
     onGestureMove: (isStylus: Boolean, currentPosition: Offset, pressure: Float) -> Unit,
     onGestureEnd: (isStylus: Boolean, wasDrag: Boolean, lastPosition: Offset) -> Unit,
     onPinchZoom: (zoomFactor: Float) -> Unit,
     onPinchStart: () -> Unit = {},
-    onPinchEnd: () -> Unit = {}
+    onPinchEnd: () -> Unit = {},
+    onPinchPan: (panDelta: Offset) -> Unit = {},
+    onDragPan: (panDelta: Offset) -> Unit = {},
+    onDoubleTap: () -> Unit = {}
 ) {
     awaitPointerEventScope {
         var activeTrackingPointerId: PointerId? = null
@@ -111,8 +116,20 @@ suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
         var activeTrackingLastPos = Offset.Zero
         var activeTrackingIsDrag = false
 
+        // Deliberate pinch-to-zoom tracking with activation threshold
         var isPinching = false
+        var isPinchGestureRecognized = false
+        var initialPinchDistance = 0.0
         var previousPinchDistance = 0.0
+        // Deliberate span change required before pinch responds (eliminates accidental triggers & resting finger jitter)
+        val pinchActivationThresholdPx = 36.0
+
+        // Double-tap tracking to return to Fit-To-Screen
+        var touchTapDownTime = 0L
+        var touchTapDownPos = Offset.Zero
+        var touchTapMoved = false
+        var lastDoubleTapTime = 0L
+        var lastDoubleTapPos = Offset.Zero
 
         while (true) {
             val event = awaitPointerEvent(PointerEventPass.Main)
@@ -165,29 +182,80 @@ suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
             val hasStylusPressed = event.changes.any { it.pressed && (it.type == PointerType.Stylus || it.type == PointerType.Eraser) }
 
             if (pressedTouchChanges.size >= 2 && !hasStylusPressed) {
-                if (!isPinching) {
-                    isPinching = true
-                    previousPinchDistance = 0.0
-                    onPinchStart()
-                }
+                touchTapDownTime = 0L // Cancel any single tap during multi-touch
                 val p1 = pressedTouchChanges[0]
                 val p2 = pressedTouchChanges[1]
                 val currDist = hypot(
                     (p1.position.x - p2.position.x).toDouble(),
                     (p1.position.y - p2.position.y).toDouble()
                 )
-                if (previousPinchDistance > 5.0 && currDist > 5.0) {
-                    val factor = (currDist / previousPinchDistance).toFloat()
-                    if (factor in 0.5f..2.0f) {
-                        onPinchZoom(factor)
+
+                if (!isPinching) {
+                    isPinching = true
+                    isPinchGestureRecognized = false
+                    initialPinchDistance = currDist
+                    previousPinchDistance = currDist
+                } else if (!isPinchGestureRecognized) {
+                    // Require deliberate motion exceeding activation threshold before recognizing as pinch
+                    val spanDelta = abs(currDist - initialPinchDistance)
+                    if (spanDelta >= pinchActivationThresholdPx) {
+                        isPinchGestureRecognized = true
+                        previousPinchDistance = currDist
+                        p1.consume()
+                        p2.consume()
+                        onPinchStart()
                     }
+                } else {
+                    p1.consume()
+                    p2.consume()
+                    if (previousPinchDistance > 10.0 && currDist > 10.0) {
+                        val rawFactor = (currDist / previousPinchDistance).toFloat()
+                        // Well-tuned scaling factor: smooth scaling tracking without disorienting jumps or vibration
+                        val tunedFactor = 1.0f + (rawFactor - 1.0f) * 0.60f
+                        val safeFactor = tunedFactor.coerceIn(0.85f, 1.18f)
+                        if (abs(safeFactor - 1.0f) > 0.002f) {
+                            onPinchZoom(safeFactor)
+                        }
+                    }
+                    previousPinchDistance = currDist
                 }
-                previousPinchDistance = currDist
                 continue
             } else if (isPinching) {
+                if (isPinchGestureRecognized) {
+                    onPinchEnd()
+                }
                 isPinching = false
+                isPinchGestureRecognized = false
+                initialPinchDistance = 0.0
                 previousPinchDistance = 0.0
-                onPinchEnd()
+            }
+
+            // Track tap & double-tap on canvas for fast return to Fit-To-Screen
+            if (pressedTouchChanges.size == 1 && !hasStylusPressed) {
+                val t = pressedTouchChanges[0]
+                if (touchTapDownTime == 0L) {
+                    touchTapDownTime = System.currentTimeMillis()
+                    touchTapDownPos = t.position
+                    touchTapMoved = false
+                } else {
+                    val dist = hypot((t.position.x - touchTapDownPos.x).toDouble(), (t.position.y - touchTapDownPos.y).toDouble())
+                    if (dist > 18.0) {
+                        touchTapMoved = true
+                    }
+                }
+            } else if (touchTapDownTime != 0L) {
+                val now = System.currentTimeMillis()
+                if (!touchTapMoved && (now - touchTapDownTime) < 280L) {
+                    val tapDist = hypot((touchTapDownPos.x - lastDoubleTapPos.x).toDouble(), (touchTapDownPos.y - lastDoubleTapPos.y).toDouble())
+                    if (now - lastDoubleTapTime < 380L && tapDist < 50.0) {
+                        onDoubleTap()
+                        lastDoubleTapTime = 0L
+                    } else {
+                        lastDoubleTapTime = now
+                        lastDoubleTapPos = touchTapDownPos
+                    }
+                }
+                touchTapDownTime = 0L
             }
 
             // 3. Check for new stroke down:
@@ -226,9 +294,9 @@ suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
                     val pressure = if (candidateDown.pressure > 0f) candidateDown.pressure else 1.0f
                     onGestureStart(false, candidateDown.type, candidateDown.position, pressure)
                 } else {
-                    // Rejected for drawing! Event is left unconsumed so LazyColumn can scroll smoothly.
-                    // The pointer loop continues to run without blocking, ensuring that when the stylus
-                    // touches the screen, it is immediately detected.
+                    // Rejected for drawing! (Touch pointer in STYLUS_ONLY or AUTO with active stylus)
+                    // The event is left unconsumed so the parent viewport handles free-form 2D panning (when zoomed in)
+                    // or native continuous vertical scrolling (at fit-to-screen) with zero coordinate oscillation/vibration.
                 }
             }
         }
@@ -247,7 +315,8 @@ suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
     onGestureEnd: (isStylus: Boolean, wasDrag: Boolean, lastPosition: Offset) -> Unit,
     onPinchZoom: (zoomFactor: Float) -> Unit,
     onPinchStart: () -> Unit = {},
-    onPinchEnd: () -> Unit = {}
+    onPinchEnd: () -> Unit = {},
+    onDoubleTap: () -> Unit = {}
 ) {
     detectInkGesturesWithPalmRejection(
         inputState = inputState,
@@ -258,7 +327,8 @@ suspend fun PointerInputScope.detectInkGesturesWithPalmRejection(
         onGestureEnd = onGestureEnd,
         onPinchZoom = onPinchZoom,
         onPinchStart = onPinchStart,
-        onPinchEnd = onPinchEnd
+        onPinchEnd = onPinchEnd,
+        onDoubleTap = onDoubleTap
     )
 }
 

@@ -16,57 +16,167 @@ import com.example.inknote.data.repository.NoteRepository
 import com.example.inknote.viewmodel.PageDataState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.io.FileOutputStream
 
+data class PdfImportProgressState(
+    val notebookId: Long,
+    val current: Int,
+    val total: Int,
+    val message: String
+)
+
 object PdfManager {
+
+    private val _activeImportProgress = MutableStateFlow<PdfImportProgressState?>(null)
+    val activeImportProgress = _activeImportProgress.asStateFlow()
+
+    fun getFileNameFromUri(context: Context, uri: Uri): String {
+        var result: String? = null
+        if (uri.scheme == "content") {
+            try {
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (index >= 0) {
+                            result = cursor.getString(index)
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        if (result == null) {
+            result = uri.path?.let { path ->
+                val cut = path.lastIndexOf('/')
+                if (cut != -1) path.substring(cut + 1) else path
+            }
+        }
+        return result ?: "Document.pdf"
+    }
+
+    fun copyUriToTempFile(context: Context, uri: Uri): Uri {
+        return try {
+            val fileName = getFileNameFromUri(context, uri)
+            val cleanName = com.example.inknote.util.FileNameSanitizer.formatExportFileName(fileName, "pdf")
+            val tempFile = File(context.cacheDir, cleanName)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use { output ->
+                    input.copyTo(output)
+                    output.flush()
+                }
+            }
+            Uri.fromFile(tempFile)
+        } catch (_: Exception) {
+            uri
+        }
+    }
 
     suspend fun importPdfToNotebook(
         context: Context,
         pdfUri: Uri,
         notebookId: Long,
-        repository: NoteRepository
+        repository: NoteRepository,
+        isAppending: Boolean = false,
+        onFirstPageReady: (suspend (firstPageId: Long) -> Unit)? = null,
+        onProgress: ((current: Int, total: Int) -> Unit)? = null
     ): Int = withContext(Dispatchers.IO) {
         val contentResolver = context.contentResolver
-        val fileDescriptor: ParcelFileDescriptor? = contentResolver.openFileDescriptor(pdfUri, "r")
+        val fileDescriptor: ParcelFileDescriptor? = try {
+            contentResolver.openFileDescriptor(pdfUri, "r")
+        } catch (_: Exception) {
+            null
+        }
         if (fileDescriptor == null) return@withContext 0
 
-        val renderer = PdfRenderer(fileDescriptor)
+        val renderer = try {
+            PdfRenderer(fileDescriptor)
+        } catch (_: Exception) {
+            fileDescriptor.close()
+            return@withContext 0
+        }
+
         val pageCount = renderer.pageCount
+        if (pageCount == 0) {
+            renderer.close()
+            fileDescriptor.close()
+            return@withContext 0
+        }
+
+        val actionPrefix = if (isAppending) "Appending" else "Importing"
+        _activeImportProgress.value = PdfImportProgressState(
+            notebookId = notebookId,
+            current = 0,
+            total = pageCount,
+            message = "$actionPrefix page 1 of $pageCount..."
+        )
+
         val pdfDir = File(context.filesDir, "pdf_pages_$notebookId")
         if (!pdfDir.exists()) pdfDir.mkdirs()
 
+        // Unique batch ID to avoid collisions when multiple PDFs are appended over time
+        val batchId = System.currentTimeMillis()
+
+        // Standard screen-friendly max dimension for fast loading and crisp display
+        val targetMaxDimension = 1400f
+
         for (i in 0 until pageCount) {
-            val page = renderer.openPage(i)
-            // Render at high-density (e.g. 2x) for crisp handwriting surface
-            val scale = 2
-            val width = page.width * scale
-            val height = page.height * scale
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            // Fill with white background
-            val canvas = Canvas(bitmap)
-            canvas.drawColor(android.graphics.Color.WHITE)
-            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-            page.close()
+            try {
+                val page = renderer.openPage(i)
+                val pageMax = maxOf(page.width, page.height).toFloat()
+                val scale = if (pageMax > 0f) (targetMaxDimension / pageMax).coerceIn(1.0f, 1.8f) else 1.2f
+                val width = (page.width * scale).toInt().coerceAtLeast(1)
+                val height = (page.height * scale).toInt().coerceAtLeast(1)
 
-            val pageFile = File(pdfDir, "page_${i + 1}.png")
-            val fos = FileOutputStream(pageFile)
-            bitmap.compress(Bitmap.CompressFormat.PNG, 95, fos)
-            fos.flush()
-            fos.close()
-            bitmap.recycle()
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bitmap)
+                canvas.drawColor(android.graphics.Color.WHITE)
+                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
 
-            // Add page to database
-            repository.addPage(
-                notebookId = notebookId,
-                templateType = "BLANK",
-                customBgPath = pageFile.absolutePath,
-                pdfPageNum = i + 1
-            )
+                val pageFile = File(pdfDir, "page_${batchId}_${i + 1}.jpg")
+                FileOutputStream(pageFile).use { fos ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 85, fos)
+                    fos.flush()
+                }
+                bitmap.recycle()
+
+                // Add page to database
+                val newPageId = repository.addPage(
+                    notebookId = notebookId,
+                    templateType = "BLANK",
+                    customBgPath = pageFile.absolutePath,
+                    pdfPageNum = i + 1
+                )
+
+                // Progressive progress update (e.g. "Importing page 3 of 40")
+                val msg = "$actionPrefix page ${i + 1} of $pageCount"
+                _activeImportProgress.value = PdfImportProgressState(
+                    notebookId = notebookId,
+                    current = i + 1,
+                    total = pageCount,
+                    message = msg
+                )
+                onProgress?.invoke(i + 1, pageCount)
+
+                // When the first page is ready, notify immediately so the note can open
+                if (i == 0 && onFirstPageReady != null) {
+                    onFirstPageReady(newPageId)
+                }
+            } catch (e: Exception) {
+                // Continue with remaining pages if a single page fails
+                onProgress?.invoke(i + 1, pageCount)
+            }
         }
 
-        renderer.close()
-        fileDescriptor.close()
+        try {
+            renderer.close()
+            fileDescriptor.close()
+        } catch (_: Exception) {}
+
+        _activeImportProgress.value = null
+
         return@withContext pageCount
     }
 
@@ -75,14 +185,19 @@ object PdfManager {
         notebookTitle: String,
         pages: List<PageEntity>,
         repository: NoteRepository,
-        pagesDataMap: Map<Long, PageDataState> = emptyMap()
+        pagesDataMap: Map<Long, PageDataState> = emptyMap(),
+        pageNumber: Int? = null
     ): File = withContext(Dispatchers.IO) {
         val pdfDocument = PdfDocument()
         val exportDir = File(context.cacheDir, "exports")
         if (!exportDir.exists()) exportDir.mkdirs()
 
-        val cleanTitle = notebookTitle.replace("[^a-zA-Z0-9.-]".toRegex(), "_")
-        val outputFile = File(exportDir, "${cleanTitle}_${System.currentTimeMillis()}.pdf")
+        val fileName = com.example.inknote.util.FileNameSanitizer.formatExportFileName(
+            rawTitle = notebookTitle,
+            extension = "pdf",
+            pageNumber = pageNumber
+        )
+        val outputFile = File(exportDir, fileName)
 
         pages.forEachIndexed { index, pageEntity ->
             val pageWidth = 1000
@@ -141,6 +256,26 @@ object PdfManager {
         pdfDocument.close()
 
         return@withContext outputFile
+    }
+
+    suspend fun exportIndividualPagesToPdf(
+        context: Context,
+        notebookTitle: String,
+        pages: List<PageEntity>,
+        repository: NoteRepository,
+        pagesDataMap: Map<Long, PageDataState> = emptyMap()
+    ): List<File> = withContext(Dispatchers.IO) {
+        pages.mapIndexed { index, pageEntity ->
+            val pageNum = pageEntity.pageNumber.takeIf { it > 0 } ?: (index + 1)
+            exportNotebookToPdf(
+                context = context,
+                notebookTitle = notebookTitle,
+                pages = listOf(pageEntity),
+                repository = repository,
+                pagesDataMap = pagesDataMap,
+                pageNumber = pageNum
+            )
+        }
     }
 
     private fun drawTemplate(canvas: Canvas, templateType: String, width: Float, height: Float) {

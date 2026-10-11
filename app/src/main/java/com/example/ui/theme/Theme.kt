@@ -46,7 +46,12 @@ private val LightColorScheme = lightColorScheme(
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: com.example.inknote.data.model.ThemeMode = com.example.inknote.data.model.ThemeMode.SYSTEM,
+    darkTheme: Boolean = when (themeMode) {
+        com.example.inknote.data.model.ThemeMode.LIGHT -> false
+        com.example.inknote.data.model.ThemeMode.DARK -> true
+        com.example.inknote.data.model.ThemeMode.SYSTEM -> isSystemInDarkTheme()
+    },
     dynamicColor: Boolean = false, // Use our handcrafted Inkstead palette for consistent brand feel
     content: @Composable () -> Unit
 ) {

@@ -1,8 +1,8 @@
 package com.example.inknote.ui.canvas.components
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
+import androidx.compose.animation.*
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,6 +29,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -37,6 +38,12 @@ import com.example.inknote.data.model.ShapeType
 import com.example.inknote.data.model.ToolType
 import com.example.ui.theme.NoteInkColors
 import com.example.inknote.viewmodel.EraserMode
+import com.example.inknote.ui.theme.EraserIcon
+import com.example.inknote.ui.theme.FountainPenIcon
+import com.example.inknote.ui.theme.GeometricShapesIcon
+import com.example.inknote.ui.theme.HighlighterMarkerIcon
+import com.example.inknote.ui.theme.LaserPointerIcon
+import com.example.inknote.ui.theme.LassoIcon
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -54,6 +61,7 @@ fun CanvasTopAppBar(
     onBack: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
+    onOpenCalculator: () -> Unit = {},
     onExport: () -> Unit,
     onToggleAudioControls: () -> Unit,
     onOpenAudioList: () -> Unit,
@@ -66,6 +74,8 @@ fun CanvasTopAppBar(
     onManualSave: () -> Unit = {},
     onSpeakNotes: () -> Unit = {},
     onStopSpeakingNotes: () -> Unit = {},
+    onAddPdf: () -> Unit = {},
+    onResetToolbarPosition: () -> Unit = {},
     onOpenSettings: () -> Unit = {}
 ) {
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -111,6 +121,17 @@ fun CanvasTopAppBar(
             }
         },
         actions = {
+            // Calculator button (Inkstead Calculator Popup - positioned next to Undo)
+            IconButton(
+                onClick = onOpenCalculator,
+                modifier = Modifier.testTag("inkstead_calculator_button")
+            ) {
+                Icon(
+                    Icons.Default.Calculate,
+                    contentDescription = "Inkstead Calculator",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
             // Undo (frequently used - directly visible)
             IconButton(onClick = onUndo, enabled = canUndo) {
                 Icon(
@@ -218,6 +239,14 @@ fun CanvasTopAppBar(
                             onOpenAudioList()
                         }
                     )
+                    DropdownMenuItem(
+                        text = { Text("Add PDF to Note") },
+                        leadingIcon = { Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        onClick = {
+                            showMoreMenu = false
+                            onAddPdf()
+                        }
+                    )
                     HorizontalDivider()
                     DropdownMenuItem(
                         text = { Text("Save Note Now") },
@@ -244,8 +273,33 @@ fun CanvasTopAppBar(
                         }
                     )
                     HorizontalDivider()
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    val isDarkPaper by com.example.inknote.data.preferences.ThemeStateHolder.isDarkPaperEnabled.collectAsState()
                     DropdownMenuItem(
-                        text = { Text("App Settings (Storage)") },
+                        text = { Text(if (isDarkPaper) "Switch to Light Paper" else "Switch to Dark Paper") },
+                        leadingIcon = {
+                            Icon(
+                                if (isDarkPaper) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            com.example.inknote.data.preferences.ThemeStateHolder.setDarkPaperEnabled(context, !isDarkPaper)
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Reset Toolbar Position") },
+                        leadingIcon = { Icon(Icons.Default.RestartAlt, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.testTag("reset_toolbar_menu_item"),
+                        onClick = {
+                            showMoreMenu = false
+                            onResetToolbarPosition()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Settings & Appearance") },
                         leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
                         onClick = {
                             showMoreMenu = false
@@ -433,34 +487,76 @@ fun DockableToolbar(
     highlighterColor: Color,
     highlighterWidth: Float = 24f,
     activeShapeType: ShapeType = ShapeType.RECTANGLE,
+    eraserMode: EraserMode = EraserMode.STROKE,
     eraserWidth: Float = 30f,
     laserColor: Color = Color(0xFFEF4444),
     isLaserTailEnabled: Boolean = true,
     isMagicInkEnabled: Boolean,
-    isGridSnapEnabled: Boolean,
     rulerActive: Boolean,
-    protractorActive: Boolean,
-    compassActive: Boolean,
     onSelectTool: (ToolType) -> Unit,
     onSetPenColor: (Color) -> Unit,
     onSetPenWidth: (Float) -> Unit,
     onSetHighlighterColor: (Color) -> Unit,
     onSetHighlighterWidth: (Float) -> Unit = {},
+    onSetEraserMode: (EraserMode) -> Unit = {},
     onSetEraserWidth: (Float) -> Unit = {},
     onSetLaserColor: (Color) -> Unit = {},
     onToggleLaserTail: () -> Unit = {},
     onToggleMagicInk: () -> Unit,
-    onToggleGridSnap: () -> Unit,
     onToggleRuler: () -> Unit,
-    onToggleProtractor: () -> Unit,
-    onToggleCompass: () -> Unit,
     onSelectShapeType: (ShapeType) -> Unit,
     onOpenShapeProperties: () -> Unit,
     onPickImage: () -> Unit,
+    onAddPdf: () -> Unit = {},
+    isCollapsed: Boolean = false,
+    initialOffsetX: Float = 0f,
+    initialOffsetY: Float = 0f,
+    resetTrigger: Long = 0L,
+    onToggleCollapse: () -> Unit = {},
+    onOffsetChanged: (Float, Float) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     var openSettingsTool by remember { mutableStateOf<String?>(null) }
-    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    var dragOffset by remember(initialOffsetX, initialOffsetY, resetTrigger) {
+        mutableStateOf(Offset(initialOffsetX, initialOffsetY))
+    }
+    LaunchedEffect(initialOffsetX, initialOffsetY, resetTrigger) {
+        dragOffset = Offset(initialOffsetX, initialOffsetY)
+    }
+
+    // Active tool display helper for collapsed icon
+    val activeToolIcon = when (activeTool) {
+        ToolType.PEN -> FountainPenIcon
+        ToolType.HIGHLIGHTER -> HighlighterMarkerIcon
+        ToolType.ERASER -> EraserIcon
+        ToolType.LASSO -> LassoIcon
+        ToolType.LASER -> LaserPointerIcon
+        ToolType.TEXT -> Icons.Default.TextFields
+        ToolType.SHAPE -> GeometricShapesIcon
+        ToolType.RULER -> Icons.Default.Straighten
+        ToolType.MEDIA -> Icons.Default.Image
+        ToolType.HAND -> Icons.Default.PanTool
+    }
+
+    val activeToolIndicatorColor: Color? = when (activeTool) {
+        ToolType.PEN -> penColor
+        ToolType.HIGHLIGHTER -> highlighterColor
+        ToolType.LASER -> laserColor
+        else -> null
+    }
+
+    val activeToolLabel = when (activeTool) {
+        ToolType.PEN -> "Pen"
+        ToolType.HIGHLIGHTER -> "Highlighter"
+        ToolType.ERASER -> if (eraserMode == EraserMode.AREA) "Precision Eraser" else "Stroke Eraser"
+        ToolType.LASSO -> "Lasso"
+        ToolType.LASER -> "Laser"
+        ToolType.TEXT -> "Text"
+        ToolType.SHAPE -> "Shapes"
+        ToolType.RULER -> "Ruler"
+        ToolType.MEDIA -> "Image"
+        ToolType.HAND -> "Hand"
+    }
 
     // Central tool tap handler:
     // First tap on an inactive tool -> Selects it only, closes any open settings.
@@ -474,29 +570,98 @@ fun DockableToolbar(
         }
     }
 
-    Surface(
-        modifier = modifier
-            .offset { IntOffset(dragOffset.x.roundToInt(), dragOffset.y.roundToInt()) }
-            .padding(horizontal = 4.dp),
-        shape = RoundedCornerShape(22.dp),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-        shadowElevation = 8.dp,
-        tonalElevation = 2.dp,
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp,
-            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp)
-        ) {
-            // Contextual Settings Panel (Only opens on second tap of the active tool)
-            AnimatedVisibility(visible = openSettingsTool != null) {
+    AnimatedContent(
+        targetState = isCollapsed,
+        modifier = modifier.wrapContentSize(),
+        transitionSpec = {
+            (fadeIn(animationSpec = tween(180)) + scaleIn(initialScale = 0.85f, animationSpec = tween(180)))
+                .togetherWith(fadeOut(animationSpec = tween(140)) + scaleOut(targetScale = 0.85f, animationSpec = tween(140)))
+        },
+        label = "ToolbarCollapseExpandTransition"
+    ) { collapsed ->
+        if (collapsed) {
+            // Collapsed Single-Icon Floating Button reflecting the active tool
+            Surface(
+                modifier = Modifier
+                    .offset { IntOffset(dragOffset.x.roundToInt(), dragOffset.y.roundToInt()) }
+                    .padding(horizontal = 4.dp),
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                shadowElevation = 8.dp,
+                tonalElevation = 3.dp,
+                border = androidx.compose.foundation.BorderStroke(
+                    1.5.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onToggleCollapse)
+                        .pointerInput(Unit) {
+                            detectDragGestures(
+                                onDragEnd = {
+                                    onOffsetChanged(dragOffset.x, dragOffset.y)
+                                }
+                            ) { change, dragAmount ->
+                                change.consume()
+                                val newX = dragOffset.x + dragAmount.x
+                                val newY = (dragOffset.y + dragAmount.y).coerceAtLeast(0f)
+                                dragOffset = Offset(newX, newY)
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = activeToolIcon,
+                        contentDescription = "Expand Toolbar (Current Tool: $activeToolLabel)",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    if (activeToolIndicatorColor != null) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 9.dp, bottom = 9.dp)
+                                .size(8.dp)
+                                .background(activeToolIndicatorColor, CircleShape)
+                                .border(1.dp, MaterialTheme.colorScheme.surface, CircleShape)
+                        )
+                    }
+                }
+            }
+        } else {
+            // Full Floating Toolbar - compact capsule fitting only its content
+            Surface(
+                modifier = Modifier
+                    .offset { IntOffset(dragOffset.x.roundToInt(), dragOffset.y.roundToInt()) }
+                    .padding(horizontal = 4.dp)
+                    .widthIn(max = 680.dp),
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                shadowElevation = 8.dp,
+                tonalElevation = 2.dp,
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+                )
+            ) {
                 Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp)
+                        .wrapContentSize()
+                        .padding(horizontal = 6.dp, vertical = 5.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    // Contextual Settings Panel (Only opens on second tap of the active tool)
+                    AnimatedVisibility(visible = openSettingsTool != null) {
+                        Column(
+                            modifier = Modifier
+                                .wrapContentSize()
+                                .widthIn(max = 520.dp)
+                                .padding(bottom = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
                     when (openSettingsTool) {
                         "PEN" -> {
                             // Color swatches for Pen
@@ -521,26 +686,75 @@ fun DockableToolbar(
                                 }
                             }
 
-                            // Stroke Width presets
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
-                                verticalAlignment = Alignment.CenterVertically
+                            // Stroke Width Continuous Slider with Live Preview Swatch
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp, start = 4.dp, end = 4.dp)
                             ) {
-                                listOf(2f, 3.5f, 6f, 10f).forEach { width ->
-                                    val isSelected = penWidth == width
-                                    Button(
-                                        onClick = { onSetPenWidth(width) },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                                            contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(28.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Text("${width.toInt()}pt", fontSize = 11.sp)
+                                        Text(
+                                            text = "Pen Width",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = String.format(java.util.Locale.US, "%.1f pt", penWidth),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    // Live stroke-width preview swatch
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                                        modifier = Modifier
+                                            .width(54.dp)
+                                            .height(24.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(36.dp)
+                                                    .height(penWidth.coerceIn(1f, 16f).dp)
+                                                    .clip(RoundedCornerShape(penWidth.dp / 2f))
+                                                    .background(penColor)
+                                            )
+                                        }
                                     }
                                 }
+
+                                Slider(
+                                    value = penWidth.coerceIn(1.0f, 20.0f),
+                                    onValueChange = { newWidth ->
+                                        onSetPenWidth((newWidth * 10).roundToInt() / 10f)
+                                    },
+                                    valueRange = 1.0f..20.0f,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(32.dp)
+                                        .testTag("pen_width_slider"),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = penColor,
+                                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                )
                             }
                         }
 
@@ -567,36 +781,119 @@ fun DockableToolbar(
                                 }
                             }
 
-                            // Width presets for Highlighter
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
-                                verticalAlignment = Alignment.CenterVertically
+                            // Highlighter Width Continuous Slider with Live Preview Swatch
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 4.dp, start = 4.dp, end = 4.dp)
                             ) {
-                                listOf(8f, 16f, 24f, 32f).forEach { width ->
-                                    val isSelected = highlighterWidth == width
-                                    Button(
-                                        onClick = { onSetHighlighterWidth(width) },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                                            contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(28.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Text("${width.toInt()}pt", fontSize = 11.sp)
+                                        Text(
+                                            text = "Highlighter Width",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = String.format(java.util.Locale.US, "%.1f pt", highlighterWidth),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    // Live stroke-width preview swatch
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                                        modifier = Modifier
+                                            .width(54.dp)
+                                            .height(24.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(36.dp)
+                                                    .height((highlighterWidth * 0.45f).coerceIn(4f, 18f).dp)
+                                                    .clip(RoundedCornerShape(3.dp))
+                                                    .background(highlighterColor.copy(alpha = 0.55f))
+                                            )
+                                        }
                                     }
                                 }
+
+                                Slider(
+                                    value = highlighterWidth.coerceIn(8.0f, 48.0f),
+                                    onValueChange = { newWidth ->
+                                        onSetHighlighterWidth((newWidth * 10).roundToInt() / 10f)
+                                    },
+                                    valueRange = 8.0f..48.0f,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(32.dp)
+                                        .testTag("highlighter_width_slider"),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = highlighterColor,
+                                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                                        inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                )
                             }
                         }
 
                         "ERASER" -> {
-                            // Eraser Size Controls (Presets + Continuous Slider + Visual Circle Preview)
+                            // Eraser Mode Toggle (Stroke vs Precision Partial Vector Eraser) + Size Controls
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
+                                // Eraser Mode Selector Row
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    FilterChip(
+                                        selected = eraserMode == EraserMode.STROKE,
+                                        onClick = { onSetEraserMode(EraserMode.STROKE) },
+                                        label = { Text("Stroke Eraser", fontSize = 11.sp, fontWeight = if (eraserMode == EraserMode.STROKE) FontWeight.Bold else FontWeight.Normal) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = EraserIcon,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f).height(30.dp)
+                                    )
+                                    FilterChip(
+                                        selected = eraserMode == EraserMode.AREA,
+                                        onClick = { onSetEraserMode(EraserMode.AREA) },
+                                        label = { Text("Precision Partial", fontSize = 11.sp, fontWeight = if (eraserMode == EraserMode.AREA) FontWeight.Bold else FontWeight.Normal) },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Adjust,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f).height(30.dp)
+                                    )
+                                }
+
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -607,7 +904,7 @@ fun DockableToolbar(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Icon(
-                                            Icons.Default.AutoFixNormal,
+                                            EraserIcon,
                                             contentDescription = null,
                                             tint = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.size(16.dp)
@@ -836,52 +1133,6 @@ fun DockableToolbar(
                             }
                         }
 
-                        "PROTRACTOR" -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Icon(Icons.Default.Explore, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                    Text("Protractor Active (360°)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                }
-                                OutlinedButton(
-                                    onClick = {
-                                        openSettingsTool = null
-                                        onToggleProtractor()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(28.dp)
-                                ) {
-                                    Text("Hide Protractor", fontSize = 11.sp)
-                                }
-                            }
-                        }
-
-                        "COMPASS" -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Icon(Icons.Default.Adjust, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                    Text("Compass Active", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                }
-                                OutlinedButton(
-                                    onClick = {
-                                        openSettingsTool = null
-                                        onToggleCompass()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(28.dp)
-                                ) {
-                                    Text("Hide Compass", fontSize = 11.sp)
-                                }
-                            }
-                        }
-
                         "MAGIC_INK" -> {
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
@@ -896,29 +1147,6 @@ fun DockableToolbar(
                                     onClick = {
                                         openSettingsTool = null
                                         onToggleMagicInk()
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                    modifier = Modifier.height(28.dp)
-                                ) {
-                                    Text("Turn Off", fontSize = 11.sp)
-                                }
-                            }
-                        }
-
-                        "GRID_SNAP" -> {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Icon(Icons.Default.GridOn, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
-                                    Text("Grid Snapping Active", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                }
-                                OutlinedButton(
-                                    onClick = {
-                                        openSettingsTool = null
-                                        onToggleGridSnap()
                                     },
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                     modifier = Modifier.height(28.dp)
@@ -946,7 +1174,7 @@ fun DockableToolbar(
             LazyRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.wrapContentWidth()
             ) {
                 // Drag handle to reposition toolbar
                 item {
@@ -955,9 +1183,15 @@ fun DockableToolbar(
                             .size(36.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .pointerInput(Unit) {
-                                detectDragGestures { change, dragAmount ->
+                                detectDragGestures(
+                                    onDragEnd = {
+                                        onOffsetChanged(dragOffset.x, dragOffset.y)
+                                    }
+                                ) { change, dragAmount ->
                                     change.consume()
-                                    dragOffset += dragAmount
+                                    val newX = dragOffset.x + dragAmount.x
+                                    val newY = (dragOffset.y + dragAmount.y).coerceAtLeast(0f)
+                                    dragOffset = Offset(newX, newY)
                                 }
                             },
                         contentAlignment = Alignment.Center
@@ -971,10 +1205,33 @@ fun DockableToolbar(
                     }
                 }
 
+                // Dedicated Collapse Button (chevron left)
+                item {
+                    IconButton(
+                        onClick = {
+                            openSettingsTool = null
+                            onToggleCollapse()
+                        },
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                RoundedCornerShape(8.dp)
+                            )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ChevronLeft,
+                            contentDescription = "Collapse Toolbar",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
                 // Pen Tool: First tap selects, second tap toggles settings
                 item {
                     ToolButton(
-                        icon = Icons.Default.Edit,
+                        icon = FountainPenIcon,
                         label = "Pen",
                         isSelected = activeTool == ToolType.PEN,
                         indicatorColor = penColor,
@@ -989,7 +1246,7 @@ fun DockableToolbar(
                 // Highlighter Tool: First tap selects, second tap toggles settings
                 item {
                     ToolButton(
-                        icon = Icons.Default.BorderColor,
+                        icon = HighlighterMarkerIcon,
                         label = "Highlighter",
                         isSelected = activeTool == ToolType.HIGHLIGHTER,
                         indicatorColor = highlighterColor,
@@ -1004,10 +1261,9 @@ fun DockableToolbar(
                 // Eraser Tool: First tap selects, second tap toggles settings
                 item {
                     ToolButton(
-                        icon = Icons.Default.AutoFixNormal,
-                        label = "Eraser",
+                        icon = EraserIcon,
+                        label = if (eraserMode == EraserMode.AREA) "Precision" else "Eraser",
                         isSelected = activeTool == ToolType.ERASER,
-                        indicatorColor = Color(0xFF64748B),
                         activeColor = MaterialTheme.colorScheme.primary,
                         onClick = {
                             handleToolClick("ERASER", activeTool == ToolType.ERASER) {
@@ -1020,7 +1276,7 @@ fun DockableToolbar(
                 // Lasso Selection Tool: First tap selects, second tap toggles settings
                 item {
                     ToolButton(
-                        icon = Icons.Default.Gesture,
+                        icon = LassoIcon,
                         label = "Lasso",
                         isSelected = activeTool == ToolType.LASSO,
                         activeColor = Color(0xFF6366F1),
@@ -1035,7 +1291,7 @@ fun DockableToolbar(
                 // Laser Pointer Tool: First tap selects, second tap toggles settings
                 item {
                     ToolButton(
-                        icon = Icons.Default.Highlight,
+                        icon = LaserPointerIcon,
                         label = "Laser",
                         isSelected = activeTool == ToolType.LASER,
                         indicatorColor = laserColor,
@@ -1051,7 +1307,7 @@ fun DockableToolbar(
                 // Shapes Tool: First tap selects, second tap toggles shape picker & settings
                 item {
                     ToolButton(
-                        icon = Icons.Default.Category,
+                        icon = GeometricShapesIcon,
                         label = "Shapes",
                         isSelected = activeTool == ToolType.SHAPE,
                         onClick = {
@@ -1091,48 +1347,6 @@ fun DockableToolbar(
                     )
                 }
 
-                // Protractor Tool: First tap activates, second tap toggles options
-                item {
-                    ToolButton(
-                        icon = Icons.Default.Explore,
-                        label = "Protractor",
-                        isSelected = protractorActive,
-                        onClick = {
-                            handleToolClick("PROTRACTOR", protractorActive) {
-                                onToggleProtractor()
-                            }
-                        }
-                    )
-                }
-
-                // Compass Tool: First tap activates, second tap toggles options
-                item {
-                    ToolButton(
-                        icon = Icons.Default.Adjust,
-                        label = "Compass",
-                        isSelected = compassActive,
-                        onClick = {
-                            handleToolClick("COMPASS", compassActive) {
-                                onToggleCompass()
-                            }
-                        }
-                    )
-                }
-
-                // Grid Snapping: First tap activates, second tap toggles options
-                item {
-                    ToolButton(
-                        icon = Icons.Default.GridOn,
-                        label = "Grid Snap",
-                        isSelected = isGridSnapEnabled,
-                        onClick = {
-                            handleToolClick("GRID_SNAP", isGridSnapEnabled) {
-                                onToggleGridSnap()
-                            }
-                        }
-                    )
-                }
-
                 // Text Tool: First tap selects, second tap toggles options
                 item {
                     ToolButton(
@@ -1159,9 +1373,24 @@ fun DockableToolbar(
                         }
                     )
                 }
+
+                // Add PDF Tool
+                item {
+                    ToolButton(
+                        icon = Icons.Default.PictureAsPdf,
+                        label = "Add PDF",
+                        isSelected = false,
+                        onClick = {
+                            openSettingsTool = null
+                            onAddPdf()
+                        }
+                    )
+                }
             }
         }
     }
+    }
+}
 }
 
 @Composable
@@ -1285,7 +1514,7 @@ fun ZoomControlsBar(
             IconButton(
                 onClick = onZoomOut,
                 modifier = Modifier.size(32.dp),
-                enabled = zoomScale > 0.55f
+                enabled = zoomScale > 0.52f
             ) {
                 Icon(
                     imageVector = Icons.Default.Remove,
@@ -1310,7 +1539,7 @@ fun ZoomControlsBar(
             IconButton(
                 onClick = onZoomIn,
                 modifier = Modifier.size(32.dp),
-                enabled = zoomScale < 2.95f
+                enabled = zoomScale < 4.95f
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
@@ -1435,7 +1664,7 @@ fun CombinedBottomBar(
             IconButton(
                 onClick = onZoomOut,
                 modifier = Modifier.size(28.dp),
-                enabled = zoomScale > 0.55f
+                enabled = zoomScale > 0.52f
             ) {
                 Icon(
                     imageVector = Icons.Default.Remove,
@@ -1462,7 +1691,7 @@ fun CombinedBottomBar(
             IconButton(
                 onClick = onZoomIn,
                 modifier = Modifier.size(28.dp),
-                enabled = zoomScale < 2.95f
+                enabled = zoomScale < 4.95f
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,

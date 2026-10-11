@@ -72,7 +72,6 @@ data class NoteCanvasUiState(
     val eraserMode: EraserMode = EraserMode.STROKE,
     val eraserWidth: Float = 24f,
     val isMagicInkEnabled: Boolean = false,
-    val isGridSnapEnabled: Boolean = false,
     val laserColor: Color = Color(0xFFEF4444),
     val isLaserTailEnabled: Boolean = true,
     val palmRejectionMode: PalmRejectionMode = PalmRejectionMode.STYLUS_ONLY,
@@ -80,8 +79,6 @@ data class NoteCanvasUiState(
 
     // Geometric Tools
     val rulerState: RulerState = RulerState(),
-    val protractorState: ProtractorState = ProtractorState(),
-    val compassState: CompassState = CompassState(),
     val activeShapeType: ShapeType = ShapeType.RECTANGLE,
     val shapeStrokeColor: Color = Color(0xFF4F46E5),
     val shapeFillColor: Color = Color.Transparent,
@@ -145,12 +142,22 @@ data class NoteCanvasUiState(
     val isAiProcessing: Boolean = false,
     val aiErrorMessage: String? = null,
     val searchResults: List<Pair<Int, String>> = emptyList(),
-    val currentSearchQuery: String = ""
+    val currentSearchQuery: String = "",
+    val isToolbarCollapsed: Boolean = false,
+    val toolbarOffsetX: Float = 0f,
+    val toolbarOffsetY: Float = 0f,
+    val toolbarResetTrigger: Long = 0L,
+    val pdfImportProgress: String? = null
 )
 
 enum class EraserMode {
     STROKE,
-    AREA
+    AREA;
+
+    companion object {
+        val WHOLE_STROKE = STROKE
+        val PARTIAL_PRECISION = AREA
+    }
 }
 
 class NoteCanvasViewModel(application: Application) : AndroidViewModel(application) {
@@ -184,10 +191,12 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
                 highlighterWidth = settingsManager.highlighterWidth,
                 eraserMode = settingsManager.eraserMode,
                 eraserWidth = settingsManager.eraserWidth,
-                isGridSnapEnabled = settingsManager.isGridSnapEnabled,
                 isMagicInkEnabled = settingsManager.isMagicInkEnabled,
                 laserColor = settingsManager.laserColor,
-                isLaserTailEnabled = settingsManager.isLaserTailEnabled
+                isLaserTailEnabled = settingsManager.isLaserTailEnabled,
+                isToolbarCollapsed = settingsManager.isToolbarCollapsed,
+                toolbarOffsetX = settingsManager.toolbarOffsetX,
+                toolbarOffsetY = settingsManager.toolbarOffsetY
             )
         }
 
@@ -227,6 +236,53 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             ttsManager.isSpeaking.collect { speaking ->
                 _uiState.update { it.copy(isSpeakingTts = speaking) }
+            }
+        }
+        viewModelScope.launch {
+            PdfManager.activeImportProgress.collect { progress ->
+                if (progress != null && progress.notebookId == currentNotebookId) {
+                    val updatedPages = repository.getPagesList(currentNotebookId)
+                    _uiState.update {
+                        it.copy(
+                            pages = updatedPages,
+                            pdfImportProgress = progress.message
+                        )
+                    }
+                } else if (progress == null && _uiState.value.pdfImportProgress != null) {
+                    val updatedPages = repository.getPagesList(currentNotebookId)
+                    _uiState.update {
+                        it.copy(
+                            pages = updatedPages,
+                            pdfImportProgress = null
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun appendPdf(uri: Uri) {
+        val nbId = currentNotebookId
+        if (nbId <= 0L) return
+        viewModelScope.launch {
+            saveCurrentPageImmediately()
+            _uiState.update { it.copy(pdfImportProgress = "Preparing PDF...") }
+            withContext(Dispatchers.IO) {
+                val localUri = PdfManager.copyUriToTempFile(getApplication(), uri)
+                PdfManager.importPdfToNotebook(
+                    context = getApplication(),
+                    pdfUri = localUri,
+                    notebookId = nbId,
+                    repository = repository,
+                    isAppending = true
+                )
+            }
+            val updatedPages = repository.getPagesList(nbId)
+            _uiState.update {
+                it.copy(
+                    pages = updatedPages,
+                    pdfImportProgress = null
+                )
             }
         }
     }
@@ -368,7 +424,7 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
     fun setCurrentPageIndex(index: Int) {
         val pages = _uiState.value.pages
         if (index in pages.indices && index != _uiState.value.currentPageIndex) {
-            saveCurrentPageImmediately()
+            scheduleAutoSave()
             val targetPage = pages[index]
             _uiState.update { it.copy(currentPageIndex = index) }
             loadPageData(targetPage.id)
@@ -379,10 +435,11 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update { it.copy(isContinuousScroll = !it.isContinuousScroll) }
     }
 
-    fun addNewPage(templateType: String = "BLANK") {
+    fun addNewPage(templateType: String? = null) {
         viewModelScope.launch {
             saveCurrentPageImmediately()
-            repository.addPage(currentNotebookId, templateType)
+            val effectiveTemplate = templateType ?: currentPage?.templateType ?: "BLANK"
+            repository.addPage(currentNotebookId, effectiveTemplate)
             val updatedPages = repository.getPagesList(currentNotebookId)
             val newIndex = updatedPages.size - 1
             val newPage = updatedPages[newIndex]
@@ -436,6 +493,35 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     // Tools & Properties
+    fun toggleToolbarCollapsed() {
+        val newState = !_uiState.value.isToolbarCollapsed
+        settingsManager.isToolbarCollapsed = newState
+        _uiState.update { it.copy(isToolbarCollapsed = newState) }
+    }
+
+    fun setToolbarCollapsed(collapsed: Boolean) {
+        settingsManager.isToolbarCollapsed = collapsed
+        _uiState.update { it.copy(isToolbarCollapsed = collapsed) }
+    }
+
+    fun setToolbarOffset(offsetX: Float, offsetY: Float) {
+        settingsManager.toolbarOffsetX = offsetX
+        settingsManager.toolbarOffsetY = offsetY
+        _uiState.update { it.copy(toolbarOffsetX = offsetX, toolbarOffsetY = offsetY) }
+    }
+
+    fun resetToolbarPosition() {
+        settingsManager.resetToolbarPosition()
+        _uiState.update {
+            it.copy(
+                toolbarOffsetX = 0f,
+                toolbarOffsetY = 0f,
+                isToolbarCollapsed = false,
+                toolbarResetTrigger = it.toolbarResetTrigger + 1L
+            )
+        }
+    }
+
     fun selectTool(tool: ToolType) {
         _uiState.update { it.copy(activeTool = tool, hasSelection = false, lassoSelectedStrokes = emptyList(), lassoSelectionBounds = null) }
     }
@@ -476,12 +562,6 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update { it.copy(isMagicInkEnabled = newVal) }
     }
 
-    fun toggleGridSnap() {
-        val newVal = !_uiState.value.isGridSnapEnabled
-        settingsManager.isGridSnapEnabled = newVal
-        _uiState.update { it.copy(isGridSnapEnabled = newVal) }
-    }
-
     fun setLaserColor(color: Color) {
         settingsManager.laserColor = color
         _uiState.update { it.copy(laserColor = color) }
@@ -493,29 +573,13 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         _uiState.update { it.copy(isLaserTailEnabled = newVal) }
     }
 
-    // Ruler / Protractor / Compass
+    // Ruler
     fun toggleRuler() {
         _uiState.update { it.copy(rulerState = it.rulerState.copy(isVisible = !it.rulerState.isVisible)) }
     }
 
     fun updateRuler(centerX: Float, centerY: Float, angleDeg: Float) {
         _uiState.update { it.copy(rulerState = it.rulerState.copy(centerX = centerX, centerY = centerY, angleDegrees = angleDeg)) }
-    }
-
-    fun toggleProtractor() {
-        _uiState.update { it.copy(protractorState = it.protractorState.copy(isVisible = !it.protractorState.isVisible)) }
-    }
-
-    fun updateProtractor(centerX: Float, centerY: Float, rotationDeg: Float) {
-        _uiState.update { it.copy(protractorState = it.protractorState.copy(centerX = centerX, centerY = centerY, rotationDegrees = rotationDeg)) }
-    }
-
-    fun toggleCompass() {
-        _uiState.update { it.copy(compassState = it.compassState.copy(isVisible = !it.compassState.isVisible)) }
-    }
-
-    fun updateCompass(pivotX: Float, pivotY: Float, radius: Float, angle: Float) {
-        _uiState.update { it.copy(compassState = it.compassState.copy(pivotX = pivotX, pivotY = pivotY, radius = radius, currentAngleDegrees = angle)) }
     }
 
     fun setShapeType(shapeType: ShapeType) {
@@ -599,40 +663,140 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
         val currentData = _uiState.value.pagesData[pageId] ?: PageDataState()
         val currentStrokes = currentData.strokes
         val currentShapes = currentData.shapes
+        val isPrecisionMode = _uiState.value.eraserMode == EraserMode.AREA
 
-        val remainingStrokes = currentStrokes.filterNot { stroke ->
-            if (stroke.points.isEmpty()) return@filterNot false
-            if (stroke.points.size == 1) {
-                val p = stroke.points[0]
-                hypot((p.x - point.x).toDouble(), (p.y - point.y).toDouble()) <= (radius + stroke.strokeWidth / 2f)
-            } else {
-                for (i in 0 until stroke.points.size - 1) {
-                    val p1 = stroke.points[i]
-                    val p2 = stroke.points[i + 1]
-                    val dx = p2.x - p1.x
-                    val dy = p2.y - p1.y
-                    val lenSq = dx * dx + dy * dy
-                    val dist = if (lenSq == 0f) {
-                        hypot((point.x - p1.x).toDouble(), (point.y - p1.y).toDouble()).toFloat()
-                    } else {
-                        val t = (((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lenSq).coerceIn(0f, 1f)
-                        val projX = p1.x + t * dx
-                        val projY = p1.y + t * dy
-                        hypot((point.x - projX).toDouble(), (point.y - projY).toDouble()).toFloat()
+        val remainingStrokes: List<VectorStroke>
+        val remainingShapes: List<GeometricShape>
+        var strokesChanged = false
+        var shapesChanged = false
+
+        if (!isPrecisionMode) {
+            // Whole-stroke eraser: Delete entire stroke if touched
+            remainingStrokes = currentStrokes.filterNot { stroke ->
+                if (stroke.points.isEmpty()) return@filterNot false
+                if (stroke.points.size == 1) {
+                    val p = stroke.points[0]
+                    hypot((p.x - point.x).toDouble(), (p.y - point.y).toDouble()) <= (radius + stroke.strokeWidth / 2f)
+                } else {
+                    for (i in 0 until stroke.points.size - 1) {
+                        val p1 = stroke.points[i]
+                        val p2 = stroke.points[i + 1]
+                        val dist = GeometryEngine.distToSegment(point.x, point.y, p1.x, p1.y, p2.x, p2.y)
+                        if (dist <= (radius + stroke.strokeWidth / 2f)) return@filterNot true
                     }
-                    if (dist <= (radius + stroke.strokeWidth / 2f)) return@filterNot true
+                    false
                 }
-                false
             }
+            if (remainingStrokes.size != currentStrokes.size) {
+                strokesChanged = true
+            }
+
+            // Whole-object eraser on shapes: ONLY delete the shape if the eraser touches the shape's OUTLINE.
+            // The enclosed interior is empty space, so erasing text/ink inside the shape does NOT delete the shape!
+            remainingShapes = currentShapes.filterNot { shape ->
+                val outlineDist = GeometryEngine.distanceToShapeOutline(shape, point)
+                outlineDist <= (radius + shape.strokeWidth / 2f)
+            }
+            if (remainingShapes.size != currentShapes.size) {
+                shapesChanged = true
+            }
+        } else {
+            // Partial (precision) eraser: Works at the vector level by trimming/splitting strokes
+            val newStrokesList = mutableListOf<VectorStroke>()
+            val eraseDistThreshold = radius // precise eraser radius
+
+            currentStrokes.forEach { stroke ->
+                val points = stroke.points
+                if (points.isEmpty()) return@forEach
+
+                // Check which points fall inside the eraser circle
+                val isErasedList = points.map { pt ->
+                    hypot((pt.x - point.x).toDouble(), (pt.y - point.y).toDouble()) <= eraseDistThreshold
+                }
+
+                if (isErasedList.none { it }) {
+                    // No point was touched, keep stroke untouched
+                    newStrokesList.add(stroke)
+                } else {
+                    strokesChanged = true
+                    // Split the stroke into intact contiguous sub-segments
+                    var currentSegment = mutableListOf<StrokePoint>()
+                    points.forEachIndexed { idx, pt ->
+                        if (!isErasedList[idx]) {
+                            currentSegment.add(pt)
+                        } else {
+                            if (currentSegment.isNotEmpty()) {
+                                if (currentSegment.size >= 2 || currentSegment.size == 1) {
+                                    newStrokesList.add(stroke.copy(
+                                        id = System.nanoTime() + newStrokesList.size,
+                                        points = currentSegment.toList()
+                                    ))
+                                }
+                                currentSegment = mutableListOf()
+                            }
+                        }
+                    }
+                    if (currentSegment.isNotEmpty()) {
+                        newStrokesList.add(stroke.copy(
+                            id = System.nanoTime() + newStrokesList.size,
+                            points = currentSegment.toList()
+                        ))
+                    }
+                }
+            }
+
+            // Partial (precision) eraser on shapes:
+            // If the eraser touches the shape's OUTLINE, remove the shape and convert its remaining
+            // intact outline into vector strokes (with the touched segment erased).
+            // If the eraser is inside the shape without touching the outline, the shape remains completely untouched!
+            val newShapesList = mutableListOf<GeometricShape>()
+            currentShapes.forEach { shape ->
+                val outlineDist = GeometryEngine.distanceToShapeOutline(shape, point)
+                if (outlineDist > (eraseDistThreshold + shape.strokeWidth / 2f)) {
+                    // Eraser does not touch shape outline, leave shape fully intact
+                    newShapesList.add(shape)
+                } else {
+                    // Eraser touched part of the outline: trim that segment
+                    shapesChanged = true
+                    val outlinePoints = GeometryEngine.shapeToOutlinePoints(shape)
+                    val isErasedList = outlinePoints.map { pt ->
+                        hypot((pt.x - point.x).toDouble(), (pt.y - point.y).toDouble()) <= eraseDistThreshold
+                    }
+                    var currentSegment = mutableListOf<StrokePoint>()
+                    outlinePoints.forEachIndexed { idx, pt ->
+                        if (!isErasedList[idx]) {
+                            currentSegment.add(pt)
+                        } else {
+                            if (currentSegment.size >= 2) {
+                                newStrokesList.add(VectorStroke(
+                                    id = System.nanoTime() + newStrokesList.size,
+                                    pageId = pageId,
+                                    toolType = ToolType.PEN,
+                                    color = shape.strokeColor,
+                                    strokeWidth = shape.strokeWidth,
+                                    points = currentSegment.toList()
+                                ))
+                            }
+                            currentSegment = mutableListOf()
+                        }
+                    }
+                    if (currentSegment.size >= 2) {
+                        newStrokesList.add(VectorStroke(
+                            id = System.nanoTime() + newStrokesList.size,
+                            pageId = pageId,
+                            toolType = ToolType.PEN,
+                            color = shape.strokeColor,
+                            strokeWidth = shape.strokeWidth,
+                            points = currentSegment.toList()
+                        ))
+                    }
+                }
+            }
+            remainingStrokes = newStrokesList
+            remainingShapes = newShapesList
         }
 
-        val remainingShapes = currentShapes.filterNot { shape ->
-            val cx = shape.centerX
-            val cy = shape.centerY
-            hypot((cx - point.x).toDouble(), (cy - point.y).toDouble()) <= (radius + shape.width / 2f)
-        }
-
-        if (remainingStrokes.size != currentStrokes.size || remainingShapes.size != currentShapes.size) {
+        if (strokesChanged || shapesChanged) {
             pushUndoSnapshot()
             updatePageData(pageId, strokes = remainingStrokes, shapes = remainingShapes)
             scheduleAutoSaveForPage(pageId)
@@ -1636,12 +1800,18 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
             } else {
                 allPages
             }
+            val singlePageNum = if (pages.size == 1 && allPages.size > 1) {
+                val p = pages.first()
+                p.pageNumber.takeIf { it > 0 } ?: (allPages.indexOfFirst { it.id == p.id } + 1)
+            } else null
+
             val pdfFile = PdfManager.exportNotebookToPdf(
                 context = getApplication(),
                 notebookTitle = nb.title,
                 pages = pages,
                 repository = repository,
-                pagesDataMap = _uiState.value.pagesData
+                pagesDataMap = _uiState.value.pagesData,
+                pageNumber = singlePageNum
             )
             _uiState.update { it.copy(isExporting = false, showExportDialog = false) }
             onShared(pdfFile)
@@ -1658,9 +1828,36 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = mimeType
                 putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, file.nameWithoutExtension)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             context.startActivity(Intent.createChooser(intent, "Share Note via"))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun shareFiles(context: Context, files: List<File>, mimeType: String) {
+        try {
+            if (files.isEmpty()) return
+            if (files.size == 1) {
+                shareFile(context, files.first(), mimeType)
+                return
+            }
+            val uris = ArrayList<Uri>(files.map { file ->
+                FileProvider.getUriForFile(
+                    context,
+                    "com.aistudio.inknote.app.fileprovider",
+                    file
+                )
+            })
+            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = mimeType
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                putExtra(Intent.EXTRA_SUBJECT, files.first().nameWithoutExtension)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Share Notes via"))
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -1848,17 +2045,22 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
             _uiState.update { it.copy(isExporting = true) }
             try {
                 saveAllPendingChangesImmediately()
+                val singlePageNum = if (pages.size == 1 && allPages.size > 1) {
+                    val p = pages.first()
+                    p.pageNumber.takeIf { it > 0 } ?: (allPages.indexOfFirst { it.id == p.id } + 1)
+                } else null
+
                 val tempPdf = withContext(Dispatchers.IO) {
                     PdfManager.exportNotebookToPdf(
                         context = context,
                         notebookTitle = nb.title,
                         pages = pages,
                         repository = repository,
-                        pagesDataMap = _uiState.value.pagesData
+                        pagesDataMap = _uiState.value.pagesData,
+                        pageNumber = singlePageNum
                     )
                 }
-                val safeTitle = nb.title.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
-                val fileName = "${safeTitle}_${System.currentTimeMillis()}.pdf"
+                val fileName = com.example.inknote.util.FileNameSanitizer.formatExportFileName(nb.title, "pdf", singlePageNum)
                 val savedUri = withContext(Dispatchers.IO) {
                     DownloadUtils.saveFileToDownloads(
                         context = context,
@@ -1882,8 +2084,7 @@ class NoteCanvasViewModel(application: Application) : AndroidViewModel(applicati
             try {
                 val sourceFile = File(recording.filePath)
                 if (sourceFile.exists()) {
-                    val safeTitle = recording.title.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
-                    val fileName = "${safeTitle}_${System.currentTimeMillis()}.m4a"
+                    val fileName = com.example.inknote.util.FileNameSanitizer.formatExportFileName(recording.title, "m4a")
                     val savedUri = withContext(Dispatchers.IO) {
                         DownloadUtils.saveFileToDownloads(
                             context = context,

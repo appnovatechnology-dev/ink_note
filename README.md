@@ -5,12 +5,12 @@
 ## Core Features
 
 - **Precision Stylus Canvas**: Low-latency handwriting engine with bezier curve smoothing, pressure sensitivity, and robust palm rejection (Stylus-only and Auto-detect modes).
-- **Geometric Drafting Tools**: Built-in interactive digital ruler, protractor, compass, and shape detection (lines, circles, ellipses, rectangles, polygons).
+- **Geometric Drafting Tools**: Built-in interactive digital ruler and shape detection (lines, circles, ellipses, rectangles, polygons).
 - **Synchronized Audio & Playback**: Record lectures, meetings, and discussions with real-time waveform visualization, time-synchronized note timestamps, and offline speech-to-text transcriptions.
 - **Multi-Format Note Management**: Organize notes into subjects and notebooks, drag-and-drop categorization, rich text boxes, image insertion, and page management.
 - **Smart Study & AI Tools**: Handwriting-to-Text OCR, Math Solver, Flashcards, Quiz Generator, and Note Summarization powered by Google Gemini.
 - **Vector PDF Annotation & Flexible Export**: Import multi-page PDF documents for direct vector markup, and export full notebooks or specific page ranges (e.g. `1, 3-5, 8`) to high-resolution vector PDF.
-- **100% Local & Private**: No mandatory user accounts, cloud lock-in, or telemetry. All user notebooks, audio recordings, and vector strokes remain strictly on device with Room database persistence.
+- **Offline-First & Private**: All core note-taking works without an internet connection. Optional AI features require one. All user notebooks, audio recordings, and vector strokes remain on device with Room database persistence.
 
 ## Architecture
 

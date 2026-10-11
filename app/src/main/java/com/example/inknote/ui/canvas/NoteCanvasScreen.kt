@@ -8,8 +8,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,7 +25,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -29,6 +37,7 @@ import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.inknote.data.model.ToolType
+import com.example.inknote.ui.calculator.ScientificCalculatorPopup
 import com.example.inknote.ui.canvas.components.*
 import com.example.inknote.ui.settings.AppSettingsDialog
 import com.example.inknote.viewmodel.NoteCanvasViewModel
@@ -63,7 +72,7 @@ fun NoteCanvasScreen(
 
     // Sync viewModel.currentPageIndex -> listState when changed externally (instant cut for distant jumps!)
     LaunchedEffect(uiState.currentPageIndex) {
-        if (uiState.currentPageIndex in 0 until pageCount && listState.firstVisibleItemIndex != uiState.currentPageIndex) {
+        if (!listState.isScrollInProgress && uiState.currentPageIndex in 0 until pageCount && listState.firstVisibleItemIndex != uiState.currentPageIndex) {
             val diff = kotlin.math.abs(listState.firstVisibleItemIndex - uiState.currentPageIndex)
             if (diff > 1) {
                 listState.scrollToItem(uiState.currentPageIndex) // Instant cut, no slow animation!
@@ -91,16 +100,31 @@ fun NoteCanvasScreen(
         }
     }
 
+    // PDF import launcher to append pages to current note
+    val pdfPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            viewModel.appendPdf(uri)
+        }
+    }
+
     var showTemplateDialog by remember { mutableStateOf(false) }
     var showAudioListDialog by remember { mutableStateOf(false) }
     var showAudioControls by remember { mutableStateOf(false) }
+    var showCalculator by remember { mutableStateOf(false) }
     var showJumpToPageDialog by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var previousPageBeforeJump by remember { mutableStateOf<Int?>(null) }
     var zoomScale by remember { mutableFloatStateOf(1.0f) }
-    var isFitToScreen by remember { mutableStateOf(false) }
+    var isFitToScreen by remember { mutableStateOf(true) }
     var isBottomBarVisible by remember { mutableStateOf(true) }
     var lastBottomBarInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    // Fit-to-screen checkpoint manager and horizontal scroll state
+    val zoomGestureManager = remember { ZoomGestureManager(fitZoom = 1.0f, minZoom = 0.5f, maxZoom = 5.0f) }
+    val horizontalScrollState = rememberScrollState()
+    val isZoomedIn = zoomScale > 1.005f && !isFitToScreen
 
     // Auto-hide combined bottom bar after ~1.2s of inactivity
     LaunchedEffect(lastBottomBarInteraction, isBottomBarVisible) {
@@ -143,6 +167,7 @@ fun NoteCanvasScreen(
                 },
                 onUndo = { viewModel.undo() },
                 onRedo = { viewModel.redo() },
+                onOpenCalculator = { showCalculator = !showCalculator },
                 onExport = { viewModel.showExportDialog(true) },
                 onToggleAudioControls = { showAudioControls = !showAudioControls },
                 onOpenAudioList = { showAudioListDialog = true },
@@ -154,102 +179,148 @@ fun NoteCanvasScreen(
                 onManualSave = { viewModel.manualSaveNote() },
                 onSpeakNotes = { viewModel.speakCurrentNotes() },
                 onStopSpeakingNotes = { viewModel.stopSpeakingNotes() },
+                onAddPdf = { pdfPickerLauncher.launch("application/pdf") },
+                onResetToolbarPosition = { viewModel.resetToolbarPosition() },
                 onOpenSettings = { viewModel.setShowSettingsDialog(true) }
             )
         }
     ) { paddingValues ->
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
                 .background(Color(0xFFE2E8F0))
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, _, zoom, _ ->
-                        if (zoom != 1.0f) {
-                            isFitToScreen = false
-                            zoomScale = (zoomScale * zoom).coerceIn(0.5f, 3.5f)
-                        }
-                    }
-                }
         ) {
+            val containerWidth = maxWidth
+            val basePageWidthDp = containerWidth.coerceAtLeast(320.dp)
+
             // Continuous Vertical Scrollable Canvas (A4 aspect-ratio virtualized stream)
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
+                userScrollEnabled = !isZoomedIn,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(isZoomedIn) {
+                        if (isZoomedIn) {
+                            detectTouchPanGestures { dragAmount ->
+                                horizontalScrollState.dispatchRawDelta(-dragAmount.x)
+                                listState.dispatchRawDelta(-dragAmount.y)
+                            }
+                        }
+                    }
+                    .horizontalScroll(horizontalScrollState, enabled = false),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                contentPadding = PaddingValues(vertical = 20.dp),
+                contentPadding = PaddingValues(
+                    horizontal = 0.dp,
+                    vertical = 20.dp
+                ),
                 verticalArrangement = Arrangement.spacedBy(18.dp)
             ) {
                 items(
                     count = uiState.pages.size,
                     key = { index -> uiState.pages[index].id }
                 ) { pageIndex ->
-                    val pageEntity = uiState.pages.getOrNull(pageIndex)
-                    val isCurrentActivePage = pageIndex == uiState.currentPageIndex
-                    val pageData = uiState.pagesData[pageEntity?.id ?: -1L]
+                    // Centering wrapper: guarantees pages narrower than the viewport (zoom < 100%)
+                    // are perfectly centered with equal left/right margins, while pages wider than the viewport
+                    // span smoothly into the horizontal scroll range without clipping.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(min = containerWidth),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val pageEntity = uiState.pages.getOrNull(pageIndex)
+                        val isCurrentActivePage = pageIndex == uiState.currentPageIndex
+                        val pageData = uiState.pagesData[pageEntity?.id ?: -1L]
 
-                    val targetPageId = pageEntity?.id ?: 0L
-                    val pageStrokes = pageData?.strokes ?: emptyList()
-                    val pageShapes = pageData?.shapes ?: emptyList()
-                    val pageTexts = pageData?.textItems ?: emptyList()
-                    val pageMedias = pageData?.mediaItems ?: emptyList()
+                        val targetPageId = pageEntity?.id ?: 0L
+                        val pageStrokes = pageData?.strokes ?: emptyList()
+                        val pageShapes = pageData?.shapes ?: emptyList()
+                        val pageTexts = pageData?.textItems ?: emptyList()
+                        val pageMedias = pageData?.mediaItems ?: emptyList()
 
-                    InkDrawingCanvas(
-                        page = pageEntity,
-                        strokes = pageStrokes,
-                        shapes = pageShapes,
-                        textItems = pageTexts,
-                        mediaItems = pageMedias,
-                        activeTool = uiState.activeTool,
-                        penColor = uiState.penColor,
-                        penWidth = uiState.penWidth,
-                        highlighterColor = uiState.highlighterColor,
-                        highlighterWidth = uiState.highlighterWidth,
-                        eraserMode = uiState.eraserMode,
-                        eraserWidth = uiState.eraserWidth,
-                        isMagicInkEnabled = uiState.isMagicInkEnabled,
-                        isGridSnapEnabled = uiState.isGridSnapEnabled,
-                        laserColor = uiState.laserColor,
-                        isLaserTailEnabled = uiState.isLaserTailEnabled,
-                        rulerState = uiState.rulerState,
-                        protractorState = uiState.protractorState,
-                        compassState = uiState.compassState,
-                        activeShapeType = uiState.activeShapeType,
-                        shapeStrokeColor = uiState.shapeStrokeColor,
-                        shapeFillColor = uiState.shapeFillColor,
-                        shapeStrokeWidth = uiState.shapeStrokeWidth,
-                        shapeIsFilled = uiState.shapeIsFilled,
-                        shapeSideCount = uiState.shapeSideCount,
-                        playbackCurrentMs = uiState.playbackCurrentMs,
-                        isPlayingAudio = uiState.isPlayingAudio,
-                        zoomScale = zoomScale,
-                        isFitToScreen = isFitToScreen,
-                        palmRejectionMode = uiState.palmRejectionMode,
-                        sharedStylusInputState = viewModel.stylusInputState,
-                        hasLassoSelection = if (isCurrentActivePage) uiState.hasSelection else false,
-                        lassoSelectionBounds = if (isCurrentActivePage) uiState.lassoSelectionBounds else null,
-                        lassoSelectedStrokes = if (isCurrentActivePage) uiState.lassoSelectedStrokes else emptyList(),
-                        lassoSelectedShapes = if (isCurrentActivePage) uiState.lassoSelectedShapes else emptyList(),
-                        lassoSelectedTextItems = if (isCurrentActivePage) uiState.lassoSelectedTextItems else emptyList(),
-                        lassoSelectedMediaItems = if (isCurrentActivePage) uiState.lassoSelectedMediaItems else emptyList(),
-                        onPinchZoom = { delta ->
-                            isFitToScreen = false
-                            zoomScale = (zoomScale * delta).coerceIn(0.5f, 3.5f)
-                        },
-                        onAddStroke = { viewModel.addStrokeToPage(targetPageId, it) },
-                        onAddShape = { viewModel.addShapeToPage(targetPageId, it) },
-                        onEraseAt = { point, rad -> viewModel.eraseAtPage(targetPageId, point, rad) },
-                        onAddTextItem = { x, y -> viewModel.addTextItemToPage(targetPageId, x, y) },
-                        onUpdateTextItem = { viewModel.updateTextItemOnPage(targetPageId, it) },
-                        onDeleteTextItem = { viewModel.deleteTextItemOnPage(targetPageId, it) },
-                        onUpdateMediaItem = { viewModel.updateMediaItemOnPage(targetPageId, it) },
-                        onDeleteMediaItem = { viewModel.deleteMediaItemOnPage(targetPageId, it) },
-                        onJumpAudioToTimestamp = { viewModel.jumpAudioToTimestamp(it) },
-                        onLassoComplete = { viewModel.handleLassoSelection(it, targetPageId) },
-                        onMoveLasso = { dx, dy -> viewModel.moveLassoSelection(dx, dy, targetPageId) },
-                        onDuplicateLasso = { viewModel.duplicateLassoSelection(targetPageId) },
-                        onDeleteLasso = { viewModel.deleteLassoSelection(targetPageId) }
-                    )
+                        InkDrawingCanvas(
+                            page = pageEntity,
+                            strokes = pageStrokes,
+                            shapes = pageShapes,
+                            textItems = pageTexts,
+                            mediaItems = pageMedias,
+                            activeTool = uiState.activeTool,
+                            penColor = uiState.penColor,
+                            penWidth = uiState.penWidth,
+                            highlighterColor = uiState.highlighterColor,
+                            highlighterWidth = uiState.highlighterWidth,
+                            eraserMode = uiState.eraserMode,
+                            eraserWidth = uiState.eraserWidth,
+                            isMagicInkEnabled = uiState.isMagicInkEnabled,
+                            laserColor = uiState.laserColor,
+                            isLaserTailEnabled = uiState.isLaserTailEnabled,
+                            rulerState = uiState.rulerState,
+                            activeShapeType = uiState.activeShapeType,
+                            shapeStrokeColor = uiState.shapeStrokeColor,
+                            shapeFillColor = uiState.shapeFillColor,
+                            shapeStrokeWidth = uiState.shapeStrokeWidth,
+                            shapeIsFilled = uiState.shapeIsFilled,
+                            shapeSideCount = uiState.shapeSideCount,
+                            playbackCurrentMs = uiState.playbackCurrentMs,
+                            isPlayingAudio = uiState.isPlayingAudio,
+                            zoomScale = zoomScale,
+                            isFitToScreen = isFitToScreen,
+                            baseWidthDp = basePageWidthDp,
+                            palmRejectionMode = uiState.palmRejectionMode,
+                            sharedStylusInputState = viewModel.stylusInputState,
+                            hasLassoSelection = if (isCurrentActivePage) uiState.hasSelection else false,
+                            lassoSelectionBounds = if (isCurrentActivePage) uiState.lassoSelectionBounds else null,
+                            lassoSelectedStrokes = if (isCurrentActivePage) uiState.lassoSelectedStrokes else emptyList(),
+                            lassoSelectedShapes = if (isCurrentActivePage) uiState.lassoSelectedShapes else emptyList(),
+                            lassoSelectedTextItems = if (isCurrentActivePage) uiState.lassoSelectedTextItems else emptyList(),
+                            lassoSelectedMediaItems = if (isCurrentActivePage) uiState.lassoSelectedMediaItems else emptyList(),
+                            onPinchStart = {
+                                zoomGestureManager.onGestureStart(zoomScale)
+                            },
+                            onPinchZoom = { delta ->
+                                val newZoom = zoomGestureManager.onGestureZoom(zoomScale, delta)
+                                zoomScale = newZoom
+                                isFitToScreen = (kotlin.math.abs(newZoom - 1.0f) < 0.015f)
+                                isBottomBarVisible = true
+                                lastBottomBarInteraction = System.currentTimeMillis()
+                            },
+                            onPinchEnd = {
+                                val settledZoom = zoomGestureManager.onGestureEnd(zoomScale)
+                                zoomScale = settledZoom
+                                val atFit = (kotlin.math.abs(settledZoom - 1.0f) < 0.015f)
+                                isFitToScreen = atFit
+                                if (atFit || settledZoom <= 1.0f) {
+                                    coroutineScope.launch { horizontalScrollState.scrollTo(0) }
+                                }
+                            },
+                            onDoubleTap = {
+                                if (kotlin.math.abs(zoomScale - 1.0f) > 0.04f || !isFitToScreen) {
+                                    zoomScale = 1.0f
+                                    isFitToScreen = true
+                                    coroutineScope.launch { horizontalScrollState.scrollTo(0) }
+                                } else {
+                                    zoomScale = 2.5f
+                                    isFitToScreen = false
+                                }
+                                isBottomBarVisible = true
+                                lastBottomBarInteraction = System.currentTimeMillis()
+                            },
+                            onAddStroke = { viewModel.addStrokeToPage(targetPageId, it) },
+                            onAddShape = { viewModel.addShapeToPage(targetPageId, it) },
+                            onEraseAt = { point, rad -> viewModel.eraseAtPage(targetPageId, point, rad) },
+                            onAddTextItem = { x, y -> viewModel.addTextItemToPage(targetPageId, x, y) },
+                            onUpdateTextItem = { viewModel.updateTextItemOnPage(targetPageId, it) },
+                            onDeleteTextItem = { viewModel.deleteTextItemOnPage(targetPageId, it) },
+                            onUpdateMediaItem = { viewModel.updateMediaItemOnPage(targetPageId, it) },
+                            onDeleteMediaItem = { viewModel.deleteMediaItemOnPage(targetPageId, it) },
+                            onJumpAudioToTimestamp = { viewModel.jumpAudioToTimestamp(it) },
+                            onLassoComplete = { viewModel.handleLassoSelection(it, targetPageId) },
+                            onMoveLasso = { dx, dy -> viewModel.moveLassoSelection(dx, dy, targetPageId) },
+                            onDuplicateLasso = { viewModel.duplicateLassoSelection(targetPageId) },
+                            onDeleteLasso = { viewModel.deleteLassoSelection(targetPageId) }
+                        )
+                    }
                 }
             }
 
@@ -260,16 +331,10 @@ fun NoteCanvasScreen(
                 onClose = { viewModel.toggleRuler() }
             )
 
-            ProtractorOverlay(
-                protractorState = uiState.protractorState,
-                onUpdate = { x, y, rot -> viewModel.updateProtractor(x, y, rot) },
-                onClose = { viewModel.toggleProtractor() }
-            )
-
-            CompassOverlay(
-                compassState = uiState.compassState,
-                onUpdate = { px, py, r, a -> viewModel.updateCompass(px, py, r, a) },
-                onClose = { viewModel.toggleCompass() }
+            // Floating Scientific Calculator Popup (Casio fx-991ES Plus)
+            ScientificCalculatorPopup(
+                isOpen = showCalculator,
+                onClose = { showCalculator = false }
             )
 
             // Floating Audio Recording & Playback Overlay
@@ -318,35 +383,73 @@ fun NoteCanvasScreen(
                 penWidth = uiState.penWidth,
                 highlighterColor = uiState.highlighterColor,
                 highlighterWidth = uiState.highlighterWidth,
+                eraserMode = uiState.eraserMode,
                 eraserWidth = uiState.eraserWidth,
                 laserColor = uiState.laserColor,
                 isLaserTailEnabled = uiState.isLaserTailEnabled,
                 isMagicInkEnabled = uiState.isMagicInkEnabled,
-                isGridSnapEnabled = uiState.isGridSnapEnabled,
                 rulerActive = uiState.rulerState.isVisible,
-                protractorActive = uiState.protractorState.isVisible,
-                compassActive = uiState.compassState.isVisible,
                 onSelectTool = { viewModel.selectTool(it) },
                 onSetPenColor = { viewModel.setPenColor(it) },
                 onSetPenWidth = { viewModel.setPenWidth(it) },
                 onSetHighlighterColor = { viewModel.setHighlighterColor(it) },
                 onSetHighlighterWidth = { viewModel.setHighlighterWidth(it) },
+                onSetEraserMode = { viewModel.setEraserMode(it) },
                 onSetEraserWidth = { viewModel.setEraserWidth(it) },
                 onSetLaserColor = { viewModel.setLaserColor(it) },
                 onToggleLaserTail = { viewModel.toggleLaserTail() },
                 onToggleMagicInk = { viewModel.toggleMagicInk() },
-                onToggleGridSnap = { viewModel.toggleGridSnap() },
                 onToggleRuler = { viewModel.toggleRuler() },
-                onToggleProtractor = { viewModel.toggleProtractor() },
-                onToggleCompass = { viewModel.toggleCompass() },
                 onSelectShapeType = { viewModel.setShapeType(it) },
                 onOpenShapeProperties = { viewModel.showShapeProperties(true) },
                 onPickImage = { imagePickerLauncher.launch("image/*") },
+                onAddPdf = { pdfPickerLauncher.launch("application/pdf") },
+                isCollapsed = uiState.isToolbarCollapsed,
+                initialOffsetX = uiState.toolbarOffsetX,
+                initialOffsetY = uiState.toolbarOffsetY,
+                resetTrigger = uiState.toolbarResetTrigger,
+                audioControlsShowing = showAudioControls || uiState.isRecordingAudio || uiState.isPlayingAudio,
+                onToggleCollapse = { viewModel.toggleToolbarCollapsed() },
+                onOffsetChanged = { x, y -> viewModel.setToolbarOffset(x, y) },
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = if (showAudioControls || uiState.isRecordingAudio || uiState.isPlayingAudio) 66.dp else 6.dp)
+                    .fillMaxSize()
                     .zIndex(10f)
             )
+
+            // Background PDF Progressive Import indicator
+            if (uiState.pdfImportProgress != null) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(
+                            top = if (showAudioControls || uiState.isRecordingAudio || uiState.isPlayingAudio) 66.dp else 12.dp,
+                            end = 16.dp
+                        )
+                        .zIndex(20f),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shadowElevation = 6.dp,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = uiState.pdfImportProgress ?: "",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+            }
 
             // Optional hop-back button if a jump was performed
             if (previousPageBeforeJump != null) {
@@ -458,23 +561,31 @@ fun NoteCanvasScreen(
                     onZoomIn = {
                         lastBottomBarInteraction = System.currentTimeMillis()
                         isFitToScreen = false
-                        zoomScale = (zoomScale + 0.15f).coerceAtMost(4.0f)
+                        zoomScale = (zoomScale + 0.25f).coerceAtMost(5.0f)
                     },
                     onZoomOut = {
                         lastBottomBarInteraction = System.currentTimeMillis()
                         isFitToScreen = false
-                        zoomScale = (zoomScale - 0.15f).coerceAtLeast(0.5f)
+                        val nextZoom = (zoomScale - 0.25f).coerceAtLeast(0.5f)
+                        zoomScale = nextZoom
+                        if (nextZoom <= 1.0f) {
+                            coroutineScope.launch { horizontalScrollState.scrollTo(0) }
+                        }
                     },
                     onResetZoom = {
                         lastBottomBarInteraction = System.currentTimeMillis()
-                        isFitToScreen = false
+                        isFitToScreen = true
                         zoomScale = 1.0f
+                        coroutineScope.launch { horizontalScrollState.scrollTo(0) }
                     },
                     onToggleFitToScreen = {
                         lastBottomBarInteraction = System.currentTimeMillis()
                         isFitToScreen = !isFitToScreen
                         if (isFitToScreen) {
                             zoomScale = 1.0f
+                            coroutineScope.launch { horizontalScrollState.scrollTo(0) }
+                        } else {
+                            zoomScale = 2.0f
                         }
                     }
                 )
@@ -649,6 +760,7 @@ fun NoteCanvasScreen(
         AppSettingsDialog(
             currentPalmMode = uiState.palmRejectionMode,
             onSetPalmMode = { viewModel.setPalmRejectionMode(it) },
+            onResetToolbar = { viewModel.resetToolbarPosition() },
             onDismiss = { viewModel.setShowSettingsDialog(false) }
         )
     }
@@ -682,3 +794,47 @@ fun NoteCanvasScreen(
         )
     }
 }
+
+/**
+ * Detects touch-only drag gestures on a stable coordinate frame.
+ * Explicitly ignores stylus events so pen/pencil/highlighter writing is never intercepted.
+ * Consumes drag events and provides smooth 1:1 delta offsets without coordinate feedback loops or vibration.
+ */
+private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.detectTouchPanGestures(
+    onPan: (dragAmount: androidx.compose.ui.geometry.Offset) -> Unit
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Main)
+        if (down.type != PointerType.Touch) return@awaitEachGesture
+        if (down.isConsumed) return@awaitEachGesture
+
+        val pointerId = down.id
+        var hasPassedSlop = false
+
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Main)
+            val change = event.changes.firstOrNull { it.id == pointerId }
+            if (change == null || !change.pressed || change.type != PointerType.Touch) {
+                break
+            }
+            if (change.isConsumed) {
+                break
+            }
+
+            val drag = change.positionChange()
+            if (!hasPassedSlop) {
+                if (drag.getDistance() > 4f) {
+                    hasPassedSlop = true
+                    change.consume()
+                    onPan(drag)
+                }
+            } else {
+                if (drag.getDistance() > 0.05f) {
+                    change.consume()
+                    onPan(drag)
+                }
+            }
+        }
+    }
+}
+

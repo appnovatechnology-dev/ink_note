@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -65,12 +66,9 @@ fun InkDrawingCanvas(
     eraserMode: EraserMode,
     eraserWidth: Float,
     isMagicInkEnabled: Boolean,
-    isGridSnapEnabled: Boolean,
     laserColor: Color = Color(0xFFEF4444),
     isLaserTailEnabled: Boolean = true,
     rulerState: RulerState,
-    protractorState: ProtractorState,
-    compassState: CompassState,
     activeShapeType: ShapeType,
     shapeStrokeColor: Color,
     shapeFillColor: Color,
@@ -89,11 +87,17 @@ fun InkDrawingCanvas(
     lassoSelectedShapes: List<GeometricShape> = emptyList(),
     lassoSelectedTextItems: List<CanvasTextItem> = emptyList(),
     lassoSelectedMediaItems: List<CanvasMediaItem> = emptyList(),
+    baseWidthDp: androidx.compose.ui.unit.Dp = 440.dp,
     onLassoComplete: ((List<Offset>) -> Unit)? = null,
     onMoveLasso: ((Float, Float) -> Unit)? = null,
     onDuplicateLasso: (() -> Unit)? = null,
     onDeleteLasso: (() -> Unit)? = null,
     onPinchZoom: ((Float) -> Unit)? = null,
+    onPinchPan: ((Offset) -> Unit)? = null,
+    onDragPan: ((Offset) -> Unit)? = null,
+    onPinchStart: (() -> Unit)? = null,
+    onPinchEnd: (() -> Unit)? = null,
+    onDoubleTap: (() -> Unit)? = null,
     onAddStroke: (VectorStroke) -> Unit,
     onAddShape: (GeometricShape) -> Unit,
     onEraseAt: (Offset, Float) -> Unit,
@@ -150,16 +154,14 @@ fun InkDrawingCanvas(
         }
     }
 
-    // Dynamic Sizing based on Zoom & Fit to Screen
-    val pageModifier = if (isFitToScreen) {
-        Modifier
-            .fillMaxWidth()
-            .aspectRatio(1000f / 1414f)
-    } else {
-        Modifier
-            .width((440 * zoomScale).coerceIn(240f, 1800f).dp)
-            .aspectRatio(1000f / 1414f)
-    }
+    // Dynamic Sizing based on Zoom & Fit to Screen:
+    // Uses a stable, continuous width modifier across all zoom states.
+    // Transitioning into/out of fit-to-screen produces zero dropped frames, zero layout teardowns, and zero white flashes.
+    val effectiveScale = if (isFitToScreen) 1.0f else zoomScale
+    val targetWidthDp = (baseWidthDp * effectiveScale).coerceIn(160.dp, 4500.dp)
+    val pageModifier = Modifier
+        .width(targetWidthDp)
+        .aspectRatio(1000f / 1414f)
 
     val currentActiveTool by rememberUpdatedState(activeTool)
     val currentPenColor by rememberUpdatedState(penColor)
@@ -173,12 +175,16 @@ fun InkDrawingCanvas(
     val currentShapeIsFilled by rememberUpdatedState(shapeIsFilled)
     val currentShapeSideCount by rememberUpdatedState(shapeSideCount)
     val currentRulerState by rememberUpdatedState(rulerState)
-    val currentProtractorState by rememberUpdatedState(protractorState)
-    val currentIsGridSnapEnabled by rememberUpdatedState(isGridSnapEnabled)
     val currentLaserColor by rememberUpdatedState(laserColor)
     val currentIsLaserTailEnabled by rememberUpdatedState(isLaserTailEnabled)
     val currentZoomScale by rememberUpdatedState(zoomScale)
     val currentOnPinchZoom by rememberUpdatedState(onPinchZoom)
+    val currentOnPinchPan by rememberUpdatedState(onPinchPan)
+    val currentOnDragPan by rememberUpdatedState(onDragPan)
+    val currentIsZoomedIn by rememberUpdatedState(!isFitToScreen && zoomScale > 1.015f)
+    val currentOnPinchStart by rememberUpdatedState(onPinchStart)
+    val currentOnPinchEnd by rememberUpdatedState(onPinchEnd)
+    val currentOnDoubleTap by rememberUpdatedState(onDoubleTap)
     val currentOnAddStroke by rememberUpdatedState(onAddStroke)
     val currentOnAddShape by rememberUpdatedState(onAddShape)
     val currentOnEraseAt by rememberUpdatedState(onEraseAt)
@@ -196,6 +202,7 @@ fun InkDrawingCanvas(
     val currentHasLassoSelection by rememberUpdatedState(hasLassoSelection)
     val selectedStrokeIds = remember(lassoSelectedStrokes) { lassoSelectedStrokes.map { it.id }.toSet() }
     val currentPalmRejectionMode by rememberUpdatedState(palmRejectionMode)
+    val templateTextMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
 
     LaunchedEffect(liveLaserPoints) {
         if (liveLaserPoints.isNotEmpty()) {
@@ -209,13 +216,22 @@ fun InkDrawingCanvas(
         }
     }
 
+    // Theme & Dark Paper Awareness
+    val isAppDarkTheme = MaterialTheme.colorScheme.background.red < 0.2f
+    val isDarkPaperSetting by com.example.inknote.data.preferences.ThemeStateHolder.isDarkPaperEnabled.collectAsState()
+    val isInvertInkSetting by com.example.inknote.data.preferences.ThemeStateHolder.isInvertInkInDarkMode.collectAsState()
+    val isDarkCanvas = isAppDarkTheme && isDarkPaperSetting
+
+    val paperColor = if (isDarkCanvas) Color(0xFF232328) else Color.White
+    val paperBorderColor = if (isDarkCanvas) Color(0xFF383842) else Color(0xFFCBD5E1)
+
     Box(
         modifier = modifier
             .padding(horizontal = 16.dp, vertical = 12.dp)
             .then(pageModifier)
             .shadow(8.dp, RoundedCornerShape(4.dp))
-            .background(Color.White, RoundedCornerShape(4.dp))
-            .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(4.dp))
+            .background(paperColor, RoundedCornerShape(4.dp))
+            .border(1.dp, paperBorderColor, RoundedCornerShape(4.dp))
     ) {
         // 1. Vector Drawing Canvas with Decoupled Transform & Inking Listeners
         Canvas(
@@ -226,6 +242,7 @@ fun InkDrawingCanvas(
                         inputState = stylusInputState,
                         getPalmRejectionMode = { currentPalmRejectionMode },
                         getAllowTouch = { false },
+                        getIsZoomedIn = { currentIsZoomedIn },
                         onGestureStart = { isStylus, pointerType, startPos, startPressure ->
                             val scaleX = pageWidth / size.width
                             val scaleY = pageHeight / size.height
@@ -256,12 +273,6 @@ fun InkDrawingCanvas(
                                 }
                             } else {
                                 activeRulerEdge = GeometryEngine.RulerEdge.NONE
-                            }
-
-                            if (activeRulerEdge == GeometryEngine.RulerEdge.NONE && currentIsGridSnapEnabled) {
-                                val snapped = GeometryEngine.snapToGrid(rawX, rawY)
-                                rawX = snapped.first
-                                rawY = snapped.second
                             }
 
                             when (currentActiveTool) {
@@ -349,11 +360,6 @@ fun InkDrawingCanvas(
                                     currentOnEraseAt(Offset(dragX, dragY), currentEraserWidth / 2f)
                                 }
                                 ToolType.SHAPE -> {
-                                    if (currentIsGridSnapEnabled) {
-                                        val snapped = GeometryEngine.snapToGrid(dragX, dragY)
-                                        dragX = snapped.first
-                                        dragY = snapped.second
-                                    }
                                     shapeDragCurrent = Offset(dragX, dragY)
                                 }
                                 else -> {}
@@ -462,6 +468,19 @@ fun InkDrawingCanvas(
                             liveStrokePoints = emptyList()
                             shapeDragStart = null
                             shapeDragCurrent = null
+                            currentOnPinchStart?.invoke()
+                        },
+                        onPinchEnd = {
+                            currentOnPinchEnd?.invoke()
+                        },
+                        onPinchPan = { panDelta ->
+                            currentOnPinchPan?.invoke(panDelta)
+                        },
+                        onDragPan = { panDelta ->
+                            currentOnDragPan?.invoke(panDelta)
+                        },
+                        onDoubleTap = {
+                            currentOnDoubleTap?.invoke()
                         }
                     )
                 }
@@ -475,7 +494,14 @@ fun InkDrawingCanvas(
                     dstSize = androidx.compose.ui.unit.IntSize(size.width.toInt(), size.height.toInt())
                 )
             } else {
-                drawBackgroundTemplate(page?.templateType ?: "BLANK", size.width, size.height, scaleFactor)
+                drawBackgroundTemplate(
+                    page?.templateType ?: "BLANK",
+                    size.width,
+                    size.height,
+                    scaleFactor,
+                    templateTextMeasurer,
+                    isDarkCanvas = isDarkCanvas
+                )
             }
 
             // 2. Shapes Layer (live shifted if selected and dragging)
@@ -491,7 +517,7 @@ fun InkDrawingCanvas(
                 } else {
                     shape
                 }
-                drawGeometricShape(renderedShape, scaleFactor)
+                drawGeometricShape(renderedShape, scaleFactor, isDarkCanvas, isInvertInkSetting)
             }
 
             // 3. Vector Strokes Layer (live shifted if selected and dragging)
@@ -507,7 +533,7 @@ fun InkDrawingCanvas(
                 } else {
                     stroke
                 }
-                drawVectorStroke(renderedStroke, scaleFactor, isHighlightedByAudio)
+                drawVectorStroke(renderedStroke, scaleFactor, isHighlightedByAudio, isDarkCanvas, isInvertInkSetting)
             }
 
             // 4. Live Stroke in progress
@@ -519,7 +545,7 @@ fun InkDrawingCanvas(
                     alpha = if (activeTool == ToolType.HIGHLIGHTER) 0.35f else 1.0f,
                     points = liveStrokePoints
                 )
-                drawVectorStroke(liveStroke, scaleFactor, false)
+                drawVectorStroke(liveStroke, scaleFactor, false, isDarkCanvas, isInvertInkSetting)
             }
 
             // 5. Live Lasso Path & Selection Box
@@ -737,8 +763,29 @@ fun InkDrawingCanvas(
     }
 }
 
-private fun DrawScope.drawBackgroundTemplate(templateType: String, width: Float, height: Float, scaleFactor: Float) {
-    val linePaintColor = Color(0x3364748B)
+private fun adjustInkColorForLegibility(color: Color, isDarkCanvas: Boolean, autoInvert: Boolean): Color {
+    if (!isDarkCanvas || !autoInvert) return color
+    // Calculate luminance using standard perceptual weights: 0.299 R + 0.587 G + 0.114 B
+    val luminance = 0.299f * color.red + 0.587f * color.green + 0.114f * color.blue
+    // If the drawn stroke is very dark (e.g. pure black, charcoal navy, dark slate),
+    // visually render it as crisp off-white for excellent contrast without modifying stored vector data
+    return if (luminance < 0.25f) {
+        Color(0xFFE8E8EA)
+    } else {
+        color
+    }
+}
+
+private fun DrawScope.drawBackgroundTemplate(
+    templateType: String,
+    width: Float,
+    height: Float,
+    scaleFactor: Float,
+    templateTextMeasurer: androidx.compose.ui.text.TextMeasurer,
+    isDarkCanvas: Boolean = false
+) {
+    val linePaintColor = if (isDarkCanvas) Color(0x38E4E4E7) else Color(0x3364748B)
+    val marginLineColor = if (isDarkCanvas) Color(0x55F87171) else Color(0x44EF4444)
 
     when (templateType) {
         "LINED_NARROW", "LINED_WIDE" -> {
@@ -748,7 +795,7 @@ private fun DrawScope.drawBackgroundTemplate(templateType: String, width: Float,
                 drawLine(color = linePaintColor, start = Offset(0f, y), end = Offset(width, y), strokeWidth = 1f)
                 y += spacing
             }
-            drawLine(color = Color(0x44EF4444), start = Offset(50f * scaleFactor, 0f), end = Offset(50f * scaleFactor, height), strokeWidth = 1.2f)
+            drawLine(color = marginLineColor, start = Offset(50f * scaleFactor, 0f), end = Offset(50f * scaleFactor, height), strokeWidth = 1.2f)
         }
         "GRID_SMALL", "GRID_LARGE" -> {
             val spacing = (if (templateType == "GRID_SMALL") 20f else 32f) * scaleFactor
@@ -769,7 +816,7 @@ private fun DrawScope.drawBackgroundTemplate(templateType: String, width: Float,
             while (x < width) {
                 var y = spacing
                 while (y < height) {
-                    drawCircle(color = Color(0x6664748B), radius = 1.4f * scaleFactor, center = Offset(x, y))
+                    drawCircle(color = if (isDarkCanvas) Color(0x45E4E4E7) else Color(0x6664748B), radius = 1.4f * scaleFactor, center = Offset(x, y))
                     y += spacing
                 }
                 x += spacing
@@ -788,21 +835,51 @@ private fun DrawScope.drawBackgroundTemplate(templateType: String, width: Float,
         "MUSIC" -> {
             val staveSpacing = 7f * scaleFactor
             var startY = 80f * scaleFactor
+            val staffLineColor = if (isDarkCanvas) Color(0x55E4E4E7) else Color(0x55334155)
             while (startY < height - 80f * scaleFactor) {
                 for (i in 0..4) {
-                    drawLine(color = Color(0x55334155), start = Offset(20f * scaleFactor, startY + i * staveSpacing), end = Offset(width - 20f * scaleFactor, startY + i * staveSpacing), strokeWidth = 1f)
+                    drawLine(color = staffLineColor, start = Offset(20f * scaleFactor, startY + i * staveSpacing), end = Offset(width - 20f * scaleFactor, startY + i * staveSpacing), strokeWidth = 1f)
                 }
                 startY += 60f * scaleFactor
             }
         }
+        "ISOMETRIC" -> {
+            val spacing = 28f * scaleFactor
+            val rowHeight = spacing * 0.866025f // sin(60 deg)
+            var y = spacing
+            var row = 0
+            val dotColor = if (isDarkCanvas) Color(0x45E4E4E7) else Color(0x6664748B)
+            while (y < height) {
+                val xOffset = if (row % 2 == 0) 0f else spacing / 2f
+                var x = xOffset
+                while (x < width) {
+                    drawCircle(color = dotColor, radius = 1.3f * scaleFactor, center = Offset(x, y))
+                    x += spacing
+                }
+                y += rowHeight
+                row++
+            }
+        }
+        "HABIT_TRACKER", "DAILY_GOALS", "WEEKLY_PLANNER", "DAILY_PLANNER",
+        "GOAL_SETTING", "ASSIGNMENT_PLANNER", "MIND_MAP", "SEMESTER_OVERVIEW", "MONTHLY_PLANNER" -> {
+            // Render rich structured template adapting to dark canvas
+            TemplateLayoutRenderer.drawTemplate(this, templateType, width, height, scaleFactor, templateTextMeasurer, isDark = isDarkCanvas)
+        }
     }
 }
 
-private fun DrawScope.drawVectorStroke(stroke: VectorStroke, scaleFactor: Float, isAudioActive: Boolean) {
+private fun DrawScope.drawVectorStroke(
+    stroke: VectorStroke,
+    scaleFactor: Float,
+    isAudioActive: Boolean,
+    isDarkCanvas: Boolean = false,
+    autoInvertDarkInk: Boolean = true
+) {
     val points = stroke.points
     if (points.isEmpty()) return
 
-    val strokeColor = if (isAudioActive) Color(0xFF6366F1) else stroke.color
+    val rawColor = if (isAudioActive) Color(0xFF818CF8) else stroke.color
+    val strokeColor = adjustInkColorForLegibility(rawColor, isDarkCanvas, autoInvertDarkInk)
     val strokeWidthPx = (if (stroke.toolType == ToolType.HIGHLIGHTER) stroke.strokeWidth * 2.5f else stroke.strokeWidth) * scaleFactor
     val strokeAlpha = if (isAudioActive) 1.0f else stroke.alpha
 
@@ -828,7 +905,12 @@ private fun DrawScope.drawVectorStroke(stroke: VectorStroke, scaleFactor: Float,
     )
 }
 
-private fun DrawScope.drawGeometricShape(shape: GeometricShape, scaleFactor: Float) {
+private fun DrawScope.drawGeometricShape(
+    shape: GeometricShape,
+    scaleFactor: Float,
+    isDarkCanvas: Boolean = false,
+    autoInvertDarkInk: Boolean = true
+) {
     val sx = shape.startX * scaleFactor
     val sy = shape.startY * scaleFactor
     val ex = shape.endX * scaleFactor
@@ -842,63 +924,75 @@ private fun DrawScope.drawGeometricShape(shape: GeometricShape, scaleFactor: Flo
     val cx = (sx + ex) / 2f
     val cy = (sy + ey) / 2f
 
-    when (shape.shapeType) {
-        ShapeType.LINE -> {
-            drawLine(color = shape.strokeColor, start = Offset(sx, sy), end = Offset(ex, ey), strokeWidth = strokeWidthPx, cap = StrokeCap.Round)
-        }
-        ShapeType.ARROW -> {
-            drawLine(color = shape.strokeColor, start = Offset(sx, sy), end = Offset(ex, ey), strokeWidth = strokeWidthPx, cap = StrokeCap.Round)
-            val angle = atan2((ey - sy).toDouble(), (ex - sx).toDouble())
-            val arrowLen = 18.0 * scaleFactor
-            val arrowAngle = Math.toRadians(25.0)
-            val x1 = ex - arrowLen * cos(angle - arrowAngle)
-            val y1 = ey - arrowLen * sin(angle - arrowAngle)
-            val x2 = ex - arrowLen * cos(angle + arrowAngle)
-            val y2 = ey - arrowLen * sin(angle + arrowAngle)
-            val arrowPath = Path().apply {
-                moveTo(ex, ey)
-                lineTo(x1.toFloat(), y1.toFloat())
-                lineTo(x2.toFloat(), y2.toFloat())
-                close()
+    val effectiveStrokeColor = adjustInkColorForLegibility(shape.strokeColor, isDarkCanvas, autoInvertDarkInk)
+
+    val drawBody = {
+        when (shape.shapeType) {
+            ShapeType.LINE -> {
+                drawLine(color = effectiveStrokeColor, start = Offset(sx, sy), end = Offset(ex, ey), strokeWidth = strokeWidthPx, cap = StrokeCap.Round)
             }
-            drawPath(path = arrowPath, color = shape.strokeColor, style = Fill)
-        }
-        ShapeType.RECTANGLE, ShapeType.SQUARE -> {
-            if (shape.isFilled) {
-                drawRect(color = shape.fillColor, topLeft = Offset(left, top), size = Size(width, height), style = Fill)
+            ShapeType.ARROW -> {
+                drawLine(color = effectiveStrokeColor, start = Offset(sx, sy), end = Offset(ex, ey), strokeWidth = strokeWidthPx, cap = StrokeCap.Round)
+                val angle = atan2((ey - sy).toDouble(), (ex - sx).toDouble())
+                val arrowLen = 18.0 * scaleFactor
+                val arrowAngle = Math.toRadians(25.0)
+                val x1 = ex - arrowLen * cos(angle - arrowAngle)
+                val y1 = ey - arrowLen * sin(angle - arrowAngle)
+                val x2 = ex - arrowLen * cos(angle + arrowAngle)
+                val y2 = ey - arrowLen * sin(angle + arrowAngle)
+                val arrowPath = Path().apply {
+                    moveTo(ex, ey)
+                    lineTo(x1.toFloat(), y1.toFloat())
+                    lineTo(x2.toFloat(), y2.toFloat())
+                    close()
+                }
+                drawPath(path = arrowPath, color = effectiveStrokeColor, style = Fill)
             }
-            drawRect(color = shape.strokeColor, topLeft = Offset(left, top), size = Size(width, height), style = Stroke(width = strokeWidthPx))
-        }
-        ShapeType.CIRCLE, ShapeType.ELLIPSE -> {
-            if (shape.isFilled) {
-                drawOval(color = shape.fillColor, topLeft = Offset(left, top), size = Size(width, height), style = Fill)
+            ShapeType.RECTANGLE, ShapeType.SQUARE -> {
+                if (shape.isFilled) {
+                    drawRect(color = shape.fillColor, topLeft = Offset(left, top), size = Size(width, height), style = Fill)
+                }
+                drawRect(color = effectiveStrokeColor, topLeft = Offset(left, top), size = Size(width, height), style = Stroke(width = strokeWidthPx))
             }
-            drawOval(color = shape.strokeColor, topLeft = Offset(left, top), size = Size(width, height), style = Stroke(width = strokeWidthPx))
-        }
-        ShapeType.TRIANGLE -> {
-            val triPath = Path().apply {
-                moveTo(cx, top)
-                lineTo(left, top + height)
-                lineTo(left + width, top + height)
-                close()
+            ShapeType.CIRCLE, ShapeType.ELLIPSE -> {
+                if (shape.isFilled) {
+                    drawOval(color = shape.fillColor, topLeft = Offset(left, top), size = Size(width, height), style = Fill)
+                }
+                drawOval(color = effectiveStrokeColor, topLeft = Offset(left, top), size = Size(width, height), style = Stroke(width = strokeWidthPx))
             }
-            if (shape.isFilled) drawPath(path = triPath, color = shape.fillColor, style = Fill)
-            drawPath(path = triPath, color = shape.strokeColor, style = Stroke(width = strokeWidthPx, join = StrokeJoin.Round))
-        }
-        ShapeType.POLYGON, ShapeType.STAR -> {
-            val polyPath = Path()
-            val r = width / 2f
-            val sides = shape.sideCount.coerceAtLeast(3)
-            for (i in 0 until sides) {
-                val theta = (i * 2 * Math.PI / sides) - Math.PI / 2
-                val px = (cx + r * cos(theta)).toFloat()
-                val py = (cy + r * sin(theta)).toFloat()
-                if (i == 0) polyPath.moveTo(px, py) else polyPath.lineTo(px, py)
+            ShapeType.TRIANGLE -> {
+                val triPath = Path().apply {
+                    moveTo(cx, top)
+                    lineTo(left, top + height)
+                    lineTo(left + width, top + height)
+                    close()
+                }
+                if (shape.isFilled) drawPath(path = triPath, color = shape.fillColor, style = Fill)
+                drawPath(path = triPath, color = effectiveStrokeColor, style = Stroke(width = strokeWidthPx, join = StrokeJoin.Round))
             }
-            polyPath.close()
-            if (shape.isFilled) drawPath(path = polyPath, color = shape.fillColor, style = Fill)
-            drawPath(path = polyPath, color = shape.strokeColor, style = Stroke(width = strokeWidthPx, join = StrokeJoin.Round))
+            ShapeType.POLYGON, ShapeType.STAR -> {
+                val polyPath = Path()
+                val r = width / 2f
+                val sides = shape.sideCount.coerceAtLeast(3)
+                for (i in 0 until sides) {
+                    val theta = (i * 2 * Math.PI / sides) - Math.PI / 2
+                    val px = (cx + r * cos(theta)).toFloat()
+                    val py = (cy + r * sin(theta)).toFloat()
+                    if (i == 0) polyPath.moveTo(px, py) else polyPath.lineTo(px, py)
+                }
+                polyPath.close()
+                if (shape.isFilled) drawPath(path = polyPath, color = shape.fillColor, style = Fill)
+                drawPath(path = polyPath, color = effectiveStrokeColor, style = Stroke(width = strokeWidthPx, join = StrokeJoin.Round))
+            }
         }
+    }
+
+    if (shape.rotationDegrees != 0f && shape.shapeType != ShapeType.LINE && shape.shapeType != ShapeType.ARROW) {
+        rotate(degrees = shape.rotationDegrees, pivot = Offset(cx, cy)) {
+            drawBody()
+        }
+    } else {
+        drawBody()
     }
 }
 

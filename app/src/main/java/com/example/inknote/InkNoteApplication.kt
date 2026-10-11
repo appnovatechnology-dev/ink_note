@@ -7,6 +7,7 @@ class InkNoteApplication : Application(), ComponentCallbacks2 {
 
     override fun onCreate() {
         super.onCreate()
+        com.example.inknote.data.preferences.ThemeStateHolder.init(this)
     }
 
     override fun onTrimMemory(level: Int) {

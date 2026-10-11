@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -30,6 +32,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -40,6 +43,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,7 +54,10 @@ import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.inknote.data.db.entities.NotebookEntity
 import com.example.inknote.data.db.entities.SubjectEntity
+import com.example.inknote.data.model.PalmRejectionMode
+import com.example.inknote.ui.settings.AppSettingsDialog
 import com.example.inknote.ui.canvas.components.SecurityPinDialog
+import com.example.inknote.ui.canvas.components.TemplateLayoutRenderer
 import com.example.ui.theme.NoteInkColors
 import com.example.inknote.viewmodel.HomeUiState
 import com.example.inknote.viewmodel.HomeViewModel
@@ -68,6 +75,7 @@ fun HomeScreen(
     onOpenNotebook: (Long) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -84,6 +92,7 @@ fun HomeScreen(
     var showRenameDialogFor by remember { mutableStateOf<NotebookEntity?>(null) }
     var showMoveDialogFor by remember { mutableStateOf<NotebookEntity?>(null) }
     var notebookToUnlock by remember { mutableStateOf<NotebookEntity?>(null) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
 
     fun handleNotebookClick(notebook: NotebookEntity) {
         if (notebook.isLocked && !notebook.pinCode.isNullOrBlank()) {
@@ -97,7 +106,7 @@ fun HomeScreen(
     var draggedNotebook by remember { mutableStateOf<NotebookEntity?>(null) }
     var dragPosition by remember { mutableStateOf(Offset.Zero) }
     var activeDropTargetId by remember { mutableStateOf<Long?>(null) } // -999L = Unassigned, or subjectId
-    val dropTargetBounds = remember { mutableStateMapOf<Long, Rect>() }
+    val dropTargetBounds = remember { mutableMapOf<Long, Rect>() }
 
     fun handleDrop(targetSubjectId: Long?) {
         val nb = draggedNotebook ?: return
@@ -112,6 +121,10 @@ fun HomeScreen(
         }
         draggedNotebook = null
         activeDropTargetId = null
+    }
+
+    val handleDropLambda: (Long?) -> Unit = remember(viewModel, uiState.subjects, draggedNotebook) {
+        { targetSubjectId -> handleDrop(targetSubjectId) }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -170,6 +183,9 @@ fun HomeScreen(
                             IconButton(onClick = { pdfPickerLauncher.launch("application/pdf") }) {
                                 Icon(Icons.Default.PictureAsPdf, contentDescription = "Import PDF", tint = MaterialTheme.colorScheme.primary)
                             }
+                            IconButton(onClick = { showSettingsDialog = true }) {
+                                Icon(Icons.Default.Settings, contentDescription = "Settings", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                     )
@@ -193,145 +209,53 @@ fun HomeScreen(
                     }
                 }
             ) { innerPadding ->
-                Column(
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(innerPadding)
                         .padding(horizontal = 16.dp)
                 ) {
-                    // Quick Drop Ribbon when dragging
-                    AnimatedVisibility(visible = draggedNotebook != null) {
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.95f),
-                            shape = RoundedCornerShape(12.dp),
-                            shadowElevation = 4.dp
-                        ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Icon(Icons.AutoMirrored.Filled.DriveFileMove, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                                    Text(
-                                        "Dragging \"${draggedNotebook?.title ?: ""}\" — Drop on a folder below or in the sidebar:",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.sp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    item {
-                                        val isTarget = activeDropTargetId == -999L
-                                        Surface(
-                                            modifier = Modifier
-                                                .onGloballyPositioned { dropTargetBounds[-999L] = it.boundsInRoot() }
-                                                .clickable { handleDrop(null) },
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = if (isTarget) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
-                                            border = androidx.compose.foundation.BorderStroke(if (isTarget) 2.dp else 1.dp, MaterialTheme.colorScheme.primary)
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Icon(Icons.Default.FolderOff, contentDescription = null, tint = if (isTarget) Color.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
-                                                Text("🚫 Unassigned", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (isTarget) Color.White else MaterialTheme.colorScheme.onSurface)
-                                            }
-                                        }
-                                    }
-                                    items(uiState.subjects, key = { it.id }) { sub ->
-                                        val isTarget = activeDropTargetId == sub.id
-                                        val subColor = try { Color(android.graphics.Color.parseColor(sub.colorHex)) } catch (e: Exception) { MaterialTheme.colorScheme.primary }
-                                        Surface(
-                                            modifier = Modifier
-                                                .onGloballyPositioned { dropTargetBounds[sub.id] = it.boundsInRoot() }
-                                                .clickable { handleDrop(sub.id) },
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = if (isTarget) subColor else MaterialTheme.colorScheme.surface,
-                                            border = androidx.compose.foundation.BorderStroke(if (isTarget) 2.dp else 1.dp, subColor)
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(if (isTarget) Color.White else subColor))
-                                                Text(sub.name, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (isTarget) Color.White else MaterialTheme.colorScheme.onSurface)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Search Bar
-                    OutlinedTextField(
-                        value = uiState.searchQuery,
-                        onValueChange = { viewModel.setSearchQuery(it) },
-                        placeholder = { Text("Search notes and typed text...") },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                        trailingIcon = {
-                            if (uiState.searchQuery.isNotBlank()) {
-                                IconButton(onClick = { viewModel.setSearchQuery("") }) {
-                                    Icon(Icons.Default.Clear, contentDescription = "Clear")
-                                }
-                            }
-                        },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp)
-                    )
-
                     if (uiState.isLoading) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator()
                         }
-                    } else if (uiState.notebooks.isEmpty()) {
-                        // Empty State
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(bottom = 60.dp),
-                            contentAlignment = Alignment.Center
+                    } else if (uiState.viewMode == ViewMode.GRID) {
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(170.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 80.dp)
                         ) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.EditNote,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                                    modifier = Modifier.size(64.dp)
+                            item(span = { GridItemSpan(maxLineSpan) }, key = "home_top_header", contentType = "header") {
+                                HomeHeaderSection(
+                                    draggedNotebook = draggedNotebook,
+                                    activeDropTargetId = activeDropTargetId,
+                                    dropTargetBounds = dropTargetBounds,
+                                    handleDrop = handleDropLambda,
+                                    subjects = uiState.subjects,
+                                    searchQuery = uiState.searchQuery,
+                                    onSearchQueryChange = { viewModel.setSearchQuery(it) },
+                                    onSelectTemplate = { templateType, defaultTitle ->
+                                        viewModel.createNotebook(defaultTitle, uiState.selectedSubjectId, "#4F46E5", templateType) { id ->
+                                            onOpenNotebook(id)
+                                        }
+                                    },
+                                    onSeeMoreTemplates = {
+                                        viewModel.showNewNotebookDialog(true)
+                                    }
                                 )
-                                Text(
-                                    text = if (uiState.searchQuery.isNotBlank()) "No notes matching \"${uiState.searchQuery}\"" else "No notes here yet",
-                                    fontWeight = FontWeight.Medium,
-                                    fontSize = 16.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Button(onClick = { viewModel.showNewNotebookDialog(true) }) {
-                                    Icon(Icons.Default.Add, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Create First Note")
-                                }
                             }
-                        }
-                    } else {
-                        // Notebook List or Grid
-                        if (uiState.viewMode == ViewMode.GRID) {
-                            LazyVerticalGrid(
-                                columns = GridCells.Adaptive(170.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                                modifier = Modifier.fillMaxSize().padding(bottom = 80.dp)
-                            ) {
-                                items(uiState.notebooks, key = { it.id }) { notebook ->
+
+                            if (uiState.notebooks.isEmpty()) {
+                                item(span = { GridItemSpan(maxLineSpan) }, key = "empty_state", contentType = "empty") {
+                                    EmptyNotebooksState(
+                                        searchQuery = uiState.searchQuery,
+                                        onCreateFirst = { viewModel.showNewNotebookDialog(true) }
+                                    )
+                                }
+                            } else {
+                                items(uiState.notebooks, key = { it.id }, contentType = { "notebook_card" }) { notebook ->
                                     val isBeingDragged = draggedNotebook?.id == notebook.id
                                     NotebookGridCard(
                                         notebook = notebook,
@@ -375,12 +299,42 @@ fun HomeScreen(
                                     )
                                 }
                             }
-                        } else {
-                            LazyColumn(
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxSize().padding(bottom = 80.dp)
-                            ) {
-                                items(uiState.notebooks, key = { it.id }) { notebook ->
+                        }
+                    } else {
+                        LazyColumn(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 80.dp)
+                        ) {
+                            item(key = "home_top_header", contentType = "header") {
+                                HomeHeaderSection(
+                                    draggedNotebook = draggedNotebook,
+                                    activeDropTargetId = activeDropTargetId,
+                                    dropTargetBounds = dropTargetBounds,
+                                    handleDrop = handleDropLambda,
+                                    subjects = uiState.subjects,
+                                    searchQuery = uiState.searchQuery,
+                                    onSearchQueryChange = { viewModel.setSearchQuery(it) },
+                                    onSelectTemplate = { templateType, defaultTitle ->
+                                        viewModel.createNotebook(defaultTitle, uiState.selectedSubjectId, "#4F46E5", templateType) { id ->
+                                            onOpenNotebook(id)
+                                        }
+                                    },
+                                    onSeeMoreTemplates = {
+                                        viewModel.showNewNotebookDialog(true)
+                                    }
+                                )
+                            }
+
+                            if (uiState.notebooks.isEmpty()) {
+                                item(key = "empty_state", contentType = "empty") {
+                                    EmptyNotebooksState(
+                                        searchQuery = uiState.searchQuery,
+                                        onCreateFirst = { viewModel.showNewNotebookDialog(true) }
+                                    )
+                                }
+                            } else {
+                                items(uiState.notebooks, key = { it.id }, contentType = { "notebook_card" }) { notebook ->
                                     val isBeingDragged = draggedNotebook?.id == notebook.id
                                     NotebookListCard(
                                         notebook = notebook,
@@ -503,6 +457,22 @@ fun HomeScreen(
                 viewModel.createSubject(name, color)
                 viewModel.showNewSubjectDialog(false)
             }
+        )
+    }
+
+    if (showSettingsDialog) {
+        val settings = remember { com.example.inknote.data.preferences.SettingsManager(context) }
+        var currentPalmMode by remember { mutableStateOf(settings.palmRejectionMode) }
+        AppSettingsDialog(
+            currentPalmMode = currentPalmMode,
+            onSetPalmMode = {
+                currentPalmMode = it
+                settings.palmRejectionMode = it
+            },
+            onResetToolbar = {
+                settings.resetToolbarPosition()
+            },
+            onDismiss = { showSettingsDialog = false }
         )
     }
 
@@ -774,7 +744,7 @@ fun HomeSidebar(
             modifier = Modifier.padding(8.dp)
         ) {
             Box(modifier = Modifier.size(8.dp).background(Color(0xFF10B981), CircleShape))
-            Text("100% Local & Offline", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Offline-First", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -836,18 +806,24 @@ fun NotebookGridCard(
     onDragCancel: () -> Unit = {}
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    var cardCenterOffset by remember { mutableStateOf(Offset.Zero) }
+    val layoutCoordsRef = remember { arrayOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
 
-    val coverColor = try {
-        Color(android.graphics.Color.parseColor(notebook.coverColorHex))
-    } catch (e: Exception) {
-        MaterialTheme.colorScheme.primary
+    val coverColor = remember(notebook.coverColorHex) {
+        try {
+            Color(android.graphics.Color.parseColor(notebook.coverColorHex))
+        } catch (e: Exception) {
+            Color(0xFF6366F1)
+        }
+    }
+
+    val formattedDate = remember(notebook.updatedAt) {
+        SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(notebook.updatedAt))
     }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .onGloballyPositioned { cardCenterOffset = it.boundsInRoot().center }
+            .onGloballyPositioned { layoutCoordsRef[0] = it }
             .graphicsLayer {
                 alpha = if (isBeingDragged) 0.35f else 1.0f
                 scaleX = if (isBeingDragged) 0.95f else 1.0f
@@ -856,7 +832,8 @@ fun NotebookGridCard(
             .pointerInput(notebook.id) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { localOffset ->
-                        onDragStart(cardCenterOffset + localOffset)
+                        val rootCenter = layoutCoordsRef[0]?.boundsInRoot()?.center ?: Offset.Zero
+                        onDragStart(rootCenter + localOffset)
                     },
                     onDrag = { change, dragAmount ->
                         change.consume()
@@ -965,7 +942,7 @@ fun NotebookGridCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(notebook.updatedAt)),
+                        text = formattedDate,
                         fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1014,18 +991,24 @@ fun NotebookListCard(
     onDragCancel: () -> Unit = {}
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    var cardCenterOffset by remember { mutableStateOf(Offset.Zero) }
+    val layoutCoordsRef = remember { arrayOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
 
-    val coverColor = try {
-        Color(android.graphics.Color.parseColor(notebook.coverColorHex))
-    } catch (e: Exception) {
-        MaterialTheme.colorScheme.primary
+    val coverColor = remember(notebook.coverColorHex) {
+        try {
+            Color(android.graphics.Color.parseColor(notebook.coverColorHex))
+        } catch (e: Exception) {
+            Color(0xFF6366F1)
+        }
+    }
+
+    val formattedDate = remember(notebook.updatedAt) {
+        SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(notebook.updatedAt))
     }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .onGloballyPositioned { cardCenterOffset = it.boundsInRoot().center }
+            .onGloballyPositioned { layoutCoordsRef[0] = it }
             .graphicsLayer {
                 alpha = if (isBeingDragged) 0.35f else 1.0f
                 scaleX = if (isBeingDragged) 0.98f else 1.0f
@@ -1034,7 +1017,8 @@ fun NotebookListCard(
             .pointerInput(notebook.id) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { localOffset ->
-                        onDragStart(cardCenterOffset + localOffset)
+                        val rootCenter = layoutCoordsRef[0]?.boundsInRoot()?.center ?: Offset.Zero
+                        onDragStart(rootCenter + localOffset)
                     },
                     onDrag = { change, dragAmount ->
                         change.consume()
@@ -1089,7 +1073,7 @@ fun NotebookListCard(
                         if (notebook.audioDurationMs > 0) {
                             Text("• 🎙️ Audio", fontSize = 12.sp, color = Color(0xFFDC2626), fontWeight = FontWeight.Medium)
                         }
-                        Text("• ${SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(notebook.updatedAt))}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("• $formattedDate", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -1305,7 +1289,26 @@ fun NewNotebookDialog(
                 }
 
                 Text("Initial Template:", fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                val templates = listOf("BLANK" to "Blank", "LINED_WIDE" to "Lined Wide", "GRID_SMALL" to "Math Grid", "DOTTED" to "Dotted", "CORNELL" to "Cornell")
+                val templates = listOf(
+                    "BLANK" to "Blank",
+                    "LINED_WIDE" to "Lined Wide",
+                    "LINED_NARROW" to "Lined Narrow",
+                    "GRID_SMALL" to "Math Grid",
+                    "GRID_LARGE" to "Large Grid",
+                    "DOTTED" to "Dotted",
+                    "CORNELL" to "Cornell",
+                    "ISOMETRIC" to "Isometric",
+                    "MUSIC" to "Music Staff",
+                    "HABIT_TRACKER" to "Habit Tracker",
+                    "DAILY_GOALS" to "Daily Goals",
+                    "WEEKLY_PLANNER" to "Weekly Planner",
+                    "DAILY_PLANNER" to "Daily Planner",
+                    "GOAL_SETTING" to "Goal Setting",
+                    "ASSIGNMENT_PLANNER" to "Assignment Planner",
+                    "MIND_MAP" to "Mind Map",
+                    "SEMESTER_OVERVIEW" to "Semester Overview",
+                    "MONTHLY_PLANNER" to "Monthly Planner"
+                )
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(templates) { (key, label) ->
                         val isSelected = chosenTemplate == key
@@ -1588,5 +1591,445 @@ fun NewSubjectDialog(
         }
     )
 }
+
+private val HomeTemplateItems = listOf(
+    TemplateCardItem("HABIT_TRACKER", "Habit Tracker", "Habit Tracker"),
+    TemplateCardItem("DAILY_GOALS", "Daily Goals", "Daily Goals"),
+    TemplateCardItem("WEEKLY_PLANNER", "Weekly Planner", "Weekly Planner"),
+    TemplateCardItem("DAILY_PLANNER", "Daily Planner", "Daily Planner"),
+    TemplateCardItem("GOAL_SETTING", "Goal Setting", "Goal Setting"),
+    TemplateCardItem("ASSIGNMENT_PLANNER", "Assignment Planner", "Assignment Planner"),
+    TemplateCardItem("MIND_MAP", "Mind Map", "Mind Map"),
+    TemplateCardItem("SEMESTER_OVERVIEW", "Semester Overview", "Semester Overview"),
+    TemplateCardItem("MONTHLY_PLANNER", "Monthly Planner", "Monthly Planner"),
+    TemplateCardItem("CORNELL", "Cornell Notes", "Cornell Notes"),
+    TemplateCardItem("PLANNER", "Daily Schedule", "Daily Planner"),
+    TemplateCardItem("BLANK", "Blank Page", "Blank Note"),
+    TemplateCardItem("LINED_WIDE", "Lined Wide", "Lined Note"),
+    TemplateCardItem("GRID_SMALL", "Math Grid", "Grid Note"),
+    TemplateCardItem("DOTTED", "Dotted", "Dotted Note"),
+    TemplateCardItem("MUSIC", "Music Staff", "Music Sheet"),
+    TemplateCardItem("ISOMETRIC", "Isometric", "Isometric Sketch")
+)
+
+@Composable
+private fun StartWithTemplateSection(
+    onSelectTemplate: (templateType: String, defaultTitle: String) -> Unit,
+    onSeeMore: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Start with a template",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            TextButton(
+                onClick = onSeeMore,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = "See more",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+
+        val isDarkTheme = MaterialTheme.colorScheme.background.red < 0.2f
+
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            contentPadding = PaddingValues(vertical = 6.dp)
+        ) {
+            items(HomeTemplateItems, key = { it.type }) { item ->
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .width(136.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onSelectTemplate(item.type, item.title) }
+                ) {
+                    TemplateThumbnailPreview(
+                        templateType = item.type,
+                        isDarkTheme = isDarkTheme
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = item.label,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TemplateThumbnailPreview(
+    templateType: String,
+    isDarkTheme: Boolean
+) {
+    val paperBg = if (isDarkTheme) Color(0xFF232328) else Color.White
+    val borderColor = if (isDarkTheme) Color(0xFF383842) else Color(0xFFE2E8F0)
+    val lineColor = if (isDarkTheme) Color(0x38E4E4E7) else Color(0x3364748B)
+    val accentColor = when (templateType) {
+        "HABIT_TRACKER" -> Color(0xFFF97316)
+        "DAILY_GOALS", "GOAL_SETTING" -> Color(0xFF3B82F6)
+        "WEEKLY_PLANNER", "DAILY_PLANNER", "PLANNER", "MONTHLY_PLANNER" -> Color(0xFF6366F1)
+        "MIND_MAP" -> Color(0xFF8B5CF6)
+        "ASSIGNMENT_PLANNER", "SEMESTER_OVERVIEW" -> Color(0xFFEC4899)
+        "CORNELL" -> Color(0xFF0D9488)
+        "GRID_SMALL", "GRID_LARGE" -> Color(0xFF10B981)
+        "DOTTED", "ISOMETRIC" -> Color(0xFFF59E0B)
+        "MUSIC" -> Color(0xFFE11D48)
+        else -> Color(0xFF64748B)
+    }
+    val icon = when (templateType) {
+        "HABIT_TRACKER" -> Icons.Default.TrackChanges
+        "DAILY_GOALS", "GOAL_SETTING" -> Icons.Default.Flag
+        "WEEKLY_PLANNER", "DAILY_PLANNER", "PLANNER", "MONTHLY_PLANNER" -> Icons.Default.DateRange
+        "MIND_MAP" -> Icons.Default.AccountTree
+        "ASSIGNMENT_PLANNER", "SEMESTER_OVERVIEW" -> Icons.Default.School
+        "CORNELL" -> Icons.Default.MenuBook
+        "GRID_SMALL", "GRID_LARGE" -> Icons.Default.GridOn
+        "DOTTED", "ISOMETRIC" -> Icons.Default.Grain
+        "MUSIC" -> Icons.Default.MusicNote
+        "LINED_WIDE", "LINED_NARROW", "RULED" -> Icons.Default.FormatAlignLeft
+        else -> Icons.Default.Description
+    }
+
+    Surface(
+        modifier = Modifier
+            .width(136.dp)
+            .height(184.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = paperBg,
+        shadowElevation = 2.dp,
+        tonalElevation = 1.dp,
+        border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(10.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Header icon badge
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .background(accentColor.copy(alpha = 0.15f), RoundedCornerShape(7.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = accentColor,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .width(44.dp)
+                        .height(6.dp)
+                        .background(accentColor.copy(alpha = 0.25f), RoundedCornerShape(3.dp))
+                )
+            }
+
+            // Simulated paper pattern
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(vertical = 8.dp)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    when (templateType) {
+                        "HABIT_TRACKER" -> {
+                            val cx = w / 2f
+                            val cy = h / 2f
+                            val r = minOf(w, h) * 0.42f
+                            drawCircle(accentColor.copy(alpha = 0.12f), radius = r, center = Offset(cx, cy))
+                            drawCircle(lineColor, radius = r, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(1.2f))
+                            drawCircle(lineColor, radius = r * 0.65f, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(1f))
+                            drawCircle(lineColor, radius = r * 0.35f, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(0.8f))
+                        }
+                        "GRID_SMALL", "GRID_LARGE" -> {
+                            val spacing = if (templateType == "GRID_SMALL") 12f else 18f
+                            var x = spacing
+                            while (x < w) {
+                                drawLine(lineColor, Offset(x, 0f), Offset(x, h), strokeWidth = 0.8f)
+                                x += spacing
+                            }
+                            var y = spacing
+                            while (y < h) {
+                                drawLine(lineColor, Offset(0f, y), Offset(w, y), strokeWidth = 0.8f)
+                                y += spacing
+                            }
+                        }
+                        "DOTTED", "ISOMETRIC" -> {
+                            val spacing = 14f
+                            var x = spacing
+                            while (x < w) {
+                                var y = spacing
+                                while (y < h) {
+                                    drawCircle(lineColor, radius = 1.2f, center = Offset(x, y))
+                                    y += spacing
+                                }
+                                x += spacing
+                            }
+                        }
+                        "CORNELL" -> {
+                            val cueX = w * 0.32f
+                            val summaryY = h * 0.75f
+                            drawLine(accentColor.copy(alpha = 0.4f), Offset(cueX, 0f), Offset(cueX, summaryY), strokeWidth = 1.2f)
+                            drawLine(accentColor.copy(alpha = 0.4f), Offset(0f, summaryY), Offset(w, summaryY), strokeWidth = 1.2f)
+                            val step = 14f
+                            var y = step
+                            while (y < summaryY) {
+                                drawLine(lineColor, Offset(cueX + 6f, y), Offset(w - 4f, y), strokeWidth = 0.8f)
+                                y += step
+                            }
+                        }
+                        "WEEKLY_PLANNER", "DAILY_PLANNER", "PLANNER", "MONTHLY_PLANNER" -> {
+                            val colW = w / 3f
+                            drawLine(lineColor, Offset(colW, 0f), Offset(colW, h), strokeWidth = 1f)
+                            drawLine(lineColor, Offset(colW * 2f, 0f), Offset(colW * 2f, h), strokeWidth = 1f)
+                            drawLine(lineColor, Offset(0f, 16f), Offset(w, 16f), strokeWidth = 1.2f)
+                            var y = 30f
+                            while (y < h) {
+                                drawLine(lineColor.copy(alpha = 0.5f), Offset(4f, y), Offset(w - 4f, y), strokeWidth = 0.7f)
+                                y += 14f
+                            }
+                        }
+                        "MIND_MAP" -> {
+                            val cx = w / 2f
+                            val cy = h / 2f
+                            drawCircle(accentColor.copy(alpha = 0.25f), radius = 12f, center = Offset(cx, cy))
+                            drawCircle(accentColor, radius = 12f, center = Offset(cx, cy), style = androidx.compose.ui.graphics.drawscope.Stroke(1.2f))
+                            val nodes = listOf(
+                                Offset(w * 0.2f, h * 0.25f),
+                                Offset(w * 0.8f, h * 0.25f),
+                                Offset(w * 0.2f, h * 0.75f),
+                                Offset(w * 0.8f, h * 0.75f)
+                            )
+                            for (n in nodes) {
+                                drawLine(accentColor.copy(alpha = 0.5f), Offset(cx, cy), n, strokeWidth = 1f)
+                                drawCircle(accentColor.copy(alpha = 0.2f), radius = 8f, center = n)
+                                drawCircle(accentColor, radius = 8f, center = n, style = androidx.compose.ui.graphics.drawscope.Stroke(1f))
+                            }
+                        }
+                        "MUSIC" -> {
+                            val staffLines = 5
+                            val spacing = 7f
+                            val topY = (h - (staffLines * spacing * 2f)) / 2f
+                            for (staff in 0..1) {
+                                val sY = topY + staff * (staffLines * spacing + 14f)
+                                for (l in 0 until staffLines) {
+                                    val y = sY + l * spacing
+                                    drawLine(lineColor, Offset(4f, y), Offset(w - 4f, y), strokeWidth = 0.9f)
+                                }
+                            }
+                        }
+                        else -> {
+                            // Ruled / Lined / Goals / Default
+                            val step = 14f
+                            var y = step
+                            while (y < h) {
+                                drawLine(lineColor, Offset(4f, y), Offset(w - 4f, y), strokeWidth = 0.8f)
+                                y += step
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Bottom subtle indicator bar
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .background(accentColor.copy(alpha = 0.15f), RoundedCornerShape(2.dp))
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeHeaderSection(
+    draggedNotebook: NotebookEntity?,
+    activeDropTargetId: Long?,
+    dropTargetBounds: MutableMap<Long, Rect>,
+    handleDrop: (Long?) -> Unit,
+    subjects: List<SubjectEntity>,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    onSelectTemplate: (String, String) -> Unit,
+    onSeeMoreTemplates: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Quick Drop Ribbon when dragging
+        AnimatedVisibility(visible = draggedNotebook != null) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.95f),
+                shape = RoundedCornerShape(12.dp),
+                shadowElevation = 4.dp
+            ) {
+                Column(modifier = Modifier.padding(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.AutoMirrored.Filled.DriveFileMove, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        Text(
+                            "Dragging \"${draggedNotebook?.title ?: ""}\" — Drop on a folder below or in the sidebar:",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        item {
+                            val isTarget = activeDropTargetId == -999L
+                            Surface(
+                                modifier = Modifier
+                                    .onGloballyPositioned { dropTargetBounds[-999L] = it.boundsInRoot() }
+                                    .clickable { handleDrop(null) },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isTarget) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface,
+                                border = androidx.compose.foundation.BorderStroke(if (isTarget) 2.dp else 1.dp, MaterialTheme.colorScheme.primary)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(Icons.Default.FolderOff, contentDescription = null, tint = if (isTarget) Color.White else MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(16.dp))
+                                    Text("🚫 Unassigned", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (isTarget) Color.White else MaterialTheme.colorScheme.onSurface)
+                                }
+                            }
+                        }
+                        items(subjects, key = { it.id }) { sub ->
+                            val isTarget = activeDropTargetId == sub.id
+                            val subColor = try { Color(android.graphics.Color.parseColor(sub.colorHex)) } catch (e: Exception) { MaterialTheme.colorScheme.primary }
+                            Surface(
+                                modifier = Modifier
+                                    .onGloballyPositioned { dropTargetBounds[sub.id] = it.boundsInRoot() }
+                                    .clickable { handleDrop(sub.id) },
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isTarget) subColor else MaterialTheme.colorScheme.surface,
+                                border = androidx.compose.foundation.BorderStroke(if (isTarget) 2.dp else 1.dp, subColor)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(if (isTarget) Color.White else subColor))
+                                    Text(sub.name, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (isTarget) Color.White else MaterialTheme.colorScheme.onSurface)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Search Bar
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = onSearchQueryChange,
+            placeholder = { Text("Search notes and typed text...") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = {
+                if (searchQuery.isNotBlank()) {
+                    IconButton(onClick = { onSearchQueryChange("") }) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear")
+                    }
+                }
+            },
+            singleLine = true,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp)
+        )
+
+        // Start with a template carousel section
+        if (searchQuery.isBlank()) {
+            StartWithTemplateSection(
+                onSelectTemplate = onSelectTemplate,
+                onSeeMore = onSeeMoreTemplates
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun EmptyNotebooksState(
+    searchQuery: String,
+    onCreateFirst: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 40.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.EditNote,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                modifier = Modifier.size(64.dp)
+            )
+            Text(
+                text = if (searchQuery.isNotBlank()) "No notes matching \"$searchQuery\"" else "No notes here yet",
+                fontWeight = FontWeight.Medium,
+                fontSize = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Button(onClick = onCreateFirst) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("Create First Note")
+            }
+        }
+    }
+}
+
+private data class TemplateCardItem(
+    val type: String,
+    val label: String,
+    val title: String
+)
+
 
 
